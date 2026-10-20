@@ -61,6 +61,13 @@ fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+/// A text file, with its lines ending as they do in the repository: a Windows checkout ends them with `\r\n`.
+fn read(path: &Path) -> String {
+    fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("can't read {}: {error}", path.display()))
+        .replace("\r\n", "\n")
+}
+
 /// The Markdown files whose examples are checked.
 fn documents() -> Vec<PathBuf> {
     let mut files = vec![root().join("README.md"), root().join("docs/design.md")];
@@ -96,9 +103,9 @@ fn the_documentation_shows_what_the_compiler_does() {
     let schema = root().join("playground/schema.sql");
     let schema = schema.to_str().expect("the schema's path is text");
     let mut problems = Vec::new();
-    let (mut read, mut compiled, mut mistakes) = (0, 0, 0);
+    let (mut queries, mut compiled, mut mistakes) = (0, 0, 0);
     for file in documents() {
-        let markdown = fs::read_to_string(&file).expect("the page can be read");
+        let markdown = read(&file);
         let blocks = blocks(&markdown);
         let mut written: Vec<(usize, usize, String)> = Vec::new();
         let name = file
@@ -125,7 +132,7 @@ fn the_documentation_shows_what_the_compiler_does() {
                         parsed.diagnostics
                     ));
                 }
-                read += 1;
+                queries += 1;
             }
             let Some(before) = index.checked_sub(1).map(|before| &blocks[before]) else {
                 continue;
@@ -208,15 +215,14 @@ fn the_documentation_shows_what_the_compiler_does() {
     }
     let _ = fs::remove_dir_all(&folder);
     assert!(problems.is_empty(), "{}", problems.join("\n\n"));
-    assert!(read >= 40, "only {read} queries were read");
+    assert!(queries >= 40, "only {queries} queries were read");
     assert!(compiled >= 30, "only {compiled} queries were compiled");
     assert!(mistakes >= 5, "only {mistakes} mistakes were checked");
 }
 
 #[test]
 fn the_reference_describes_every_function_and_method() {
-    let reference = fs::read_to_string(root().join("docs/book/src/functions.md"))
-        .expect("the reference can be read");
+    let reference = read(&root().join("docs/book/src/functions.md"));
     let builtins = buttercupql::builtins::FUNCTIONS
         .iter()
         .chain(buttercupql::builtins::METHODS)
@@ -233,15 +239,13 @@ fn the_reference_describes_every_function_and_method() {
 
 #[test]
 fn the_schema_the_book_shows_is_the_one_its_examples_use() {
-    let schema =
-        fs::read_to_string(root().join("playground/schema.sql")).expect("the schema can be read");
+    let schema = read(&root().join("playground/schema.sql"));
     let statements: Vec<&str> = schema
         .lines()
         .filter(|line| !line.starts_with("--"))
         .collect();
     let statements = statements.join("\n");
-    let page =
-        fs::read_to_string(root().join("docs/book/src/schemas.md")).expect("the page can be read");
+    let page = read(&root().join("docs/book/src/schemas.md"));
     assert!(
         page.contains(statements.trim()),
         "the schema in schemas.md is not playground/schema.sql"
@@ -255,8 +259,7 @@ fn the_command_page_shows_the_help() {
         .output()
         .expect("bcql runs");
     let help = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
-    let page =
-        fs::read_to_string(root().join("docs/book/src/command.md")).expect("the page can be read");
+    let page = read(&root().join("docs/book/src/command.md"));
     assert!(
         page.contains(&format!("```text\n{help}```")),
         "command.md does not show `bcql --help` as it is:\n{help}"
