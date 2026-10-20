@@ -10,10 +10,18 @@ name: Release
 # - OVSX_PUBLISH `true`: the extension goes to Open VSX, through its trusted publishing, or with the secret OVSX_PAT.
 #
 # With a personal access token in the secret RELEASE_TOKEN, the GitHub release is made in its owner's name.
+#
+# Run by hand with a release's tag, the workflow sends that release's Python package to PyPI, for a release made
+# before PyPI's trusted publishing was set up.
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The release whose Python package goes to PyPI, such as v0.2.0"
+        required: true
 
 permissions:
   contents: read
@@ -21,6 +29,7 @@ permissions:
 jobs:
   version:
     name: The tag, the crates and the extension name one version
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -264,3 +273,24 @@ jobs:
         env:
           OVSX_PAT: ${{ secrets.OVSX_PAT }}
         run: npx --yes ovsx publish --skip-duplicate --packagePath dist/*.vsix
+
+  pypi-release:
+    name: Publish a release's Python package to PyPI
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/buttercupql/
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: The release's wheels and source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir dist \
+            --pattern '*.whl' --pattern 'buttercupql-*.tar.gz'
+          ls -l dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
