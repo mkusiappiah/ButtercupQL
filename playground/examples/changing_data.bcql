@@ -1,0 +1,17 @@
+# Changing data: old open cases copied into a table of their own, then marked stale
+def old_and_open(days_back=90):
+    where status == "open" and raised < now() - days(days_back)
+
+create table stale:
+    key: str = field(primary_key=True)
+    risk: int | None
+    raised: datetime
+
+from cases
+old_and_open()
+select key, risk, raised
+insert into stale
+
+from cases
+old_and_open()
+update status = "stale"

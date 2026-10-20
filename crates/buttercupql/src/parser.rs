@@ -662,7 +662,7 @@ impl<'a> Parser<'a> {
         while self.at_other("@") {
             let at = self.bump();
             let name = self.name("a decorator's name after `@`, such as `@stored`")?;
-            if name.text != "stored" {
+            if crate::builtins::find(crate::builtins::DECORATORS, &name.text).is_none() {
                 self.note(
                     Diagnostic::error(name.span, format!("there is no decorator `@{}`", name.text))
                         .with_help(

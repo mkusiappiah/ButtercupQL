@@ -33,7 +33,7 @@ Each of these is a statement of its own, on a line of its own: a change to the d
 
 | Written | Does |
 |---|---|
-| `create table cases:` | Create a table, its columns written as Python annotations below: `risk: int | None`. `create index on cases(-risk)` creates an index. |
+| `create table cases:` | Create a table, its columns written below as Python annotations: `name: type`. `create index on cases(-risk)` creates an index. |
 | `alter table cases:` | Change a table: add a column written as in `create table`, `del` one, or `rename old to new`. |
 | `drop table archive` | Drop a table, or with `drop index`, an index. |
 | `grant read on cases to analyst` | Let users or roles read or write tables: `read`, `write`, `insert`, `update`, `delete` or `all`. |

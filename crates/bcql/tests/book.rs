@@ -228,7 +228,8 @@ fn the_reference_describes_every_function_and_method() {
         .chain(buttercupql::builtins::METHODS)
         .chain(buttercupql::builtins::DATE_PARTS)
         .chain(buttercupql::builtins::STEPS)
-        .chain(buttercupql::builtins::STATEMENTS);
+        .chain(buttercupql::builtins::STATEMENTS)
+        .chain(buttercupql::builtins::DECORATORS);
     for builtin in builtins {
         let shown = format!("`{}`", builtin.signature);
         assert!(

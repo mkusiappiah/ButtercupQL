@@ -139,6 +139,27 @@ async function main() {
       "-- for sqlite\n",
   );
 
+  // A text of several statements shows each, ended with `;` and with its own parameters.
+  answer = {
+    dialect: "sqlite",
+    sql: "BEGIN;\nUPDATE cases SET status = ?\nWHERE risk > 90;\nCOMMIT;",
+    params: ["urgent"],
+    args: [],
+    statements: [
+      { sql: "BEGIN", params: [], kind: "begin" },
+      { sql: "UPDATE cases SET status = ?\nWHERE risk > 90", params: ["urgent"], kind: "change" },
+      { sql: "COMMIT", params: [], kind: "commit" },
+    ],
+    warnings: ["warning: this deletes every row\n"],
+  };
+  const script = await view.provideTextDocumentContent({ query: "source=file%3A%2F%2F%2Fwork%2Fscript.bcql" });
+  assert.strictEqual(
+    script,
+    "BEGIN;\n\nUPDATE cases SET status = ?\nWHERE risk > 90;\n" +
+      '-- parameters: ["urgent"]\n\n' +
+      "COMMIT;\n--\n-- warning: this deletes every row\n-- for sqlite\n",
+  );
+
   // A query that does not compile shows its problems, as comments.
   answer = { dialect: "postgres", problems: ["error: use `==` to compare\n  ┌─ open.bcql:2:14\n"] };
   const failed = await view.provideTextDocumentContent({ query: "source=file%3A%2F%2F%2Fwork%2Fopen.bcql" });

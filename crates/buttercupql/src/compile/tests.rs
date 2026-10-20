@@ -1447,6 +1447,36 @@ fn a_table_is_altered_one_change_at_a_time() {
 }
 
 #[test]
+fn rows_go_into_a_table_by_their_columns_names() {
+    let script =
+        "create table archive:\n    key: str\n\nfrom cases\nwhere risk > 90\ninsert into archive\n";
+    let problems = compile(
+        script,
+        &Options::new(Dialect::Postgres).with_schema(&schema()),
+    )
+    .unwrap_err();
+    let first = &problems[0];
+    assert_eq!(first.message, "there is no column `id` in `archive`");
+    assert_eq!(&script[first.span.range()], "archive");
+    assert_eq!(
+        first.help,
+        [
+            "the rows go in by their columns' names: choose the columns with a `select` before `insert into`"
+        ]
+    );
+    let chosen = script.replace("insert into", "select key\ninsert into");
+    let compiled = compile(
+        &chosen,
+        &Options::new(Dialect::Postgres).with_schema(&schema()),
+    )
+    .unwrap();
+    assert_eq!(
+        compiled.statements[1].sql,
+        "INSERT INTO archive (key)\nSELECT key\nFROM cases\nWHERE risk > 90"
+    );
+}
+
+#[test]
 fn later_statements_are_checked_against_the_tables_a_script_makes() {
     let script = "create table t:\n    id: int = field(primary_key=True)\n    name: str\n\nfrom t\nwhere nmae == \"x\"\n";
     let problems = compile(script, &Options::new(Dialect::Postgres)).unwrap_err();

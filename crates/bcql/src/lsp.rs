@@ -636,7 +636,7 @@ impl Server {
         }
         let trimmed = before.trim();
         if trimmed.is_empty() {
-            for step in builtins::STEPS {
+            for step in builtins::STEPS.iter().chain(builtins::STATEMENTS) {
                 items.push(builtin_item(step, KEYWORD));
             }
             for word in ["def", "import"] {
@@ -649,12 +649,38 @@ impl Server {
             }
             return Json::Array(items);
         }
+        if trimmed == "@" {
+            for decorator in builtins::DECORATORS {
+                items.push(builtin_item(decorator, KEYWORD));
+            }
+            return Json::Array(items);
+        }
         let words: Vec<&str> = trimmed.split_whitespace().collect();
-        if matches!(words.as_slice(), ["from"] | ["join"] | ["left", "join"]) {
+        let names_table = matches!(
+            words.as_slice(),
+            ["from"]
+                | ["join"]
+                | ["left", "join"]
+                | ["insert", "into"]
+                | ["alter", "table"]
+                | ["drop", "table"]
+                | ["create", .., "on"]
+                | ["grant" | "revoke", .., "on"]
+        );
+        if names_table {
             if let Some(schema) = schema {
                 for table in schema.tables() {
                     items.push(table_item(table));
                 }
+            }
+            for created in created_tables(&parsed.file) {
+                let name = &created.name.parts.last().expect("a table has a name").text;
+                if schema.is_none_or(|schema| schema.table(name).is_none()) {
+                    items.push(item(name, CLASS, "a table the file creates", ""));
+                }
+            }
+            if !matches!(words.as_slice(), ["from"] | ["join"] | ["left", "join"]) {
+                return Json::Array(items);
             }
             for named in &parsed.file.items {
                 match named {
@@ -814,6 +840,13 @@ impl Server {
         let schema = self.schema.schema.as_ref();
         let parsed = buttercupql::parse(text);
         let tables = tables_before(text, line_start);
+        let keyword = match before.trim() {
+            "" => builtins::find(builtins::STEPS, word)
+                .or_else(|| builtins::find(builtins::STATEMENTS, word)),
+            "@" => builtins::find(builtins::DECORATORS, word),
+            "left" if word == "join" => builtins::find(builtins::STEPS, "left"),
+            _ => None,
+        };
         let shown = if let Some(path) = before.strip_suffix('.') {
             let path = dotted_before(path);
             match self.attribute_of(&path, &tables, schema, uri, &parsed.file) {
@@ -835,10 +868,8 @@ impl Server {
                     .or_else(|| builtins::find(builtins::DATE_PARTS, word))
                     .map(describe),
             }
-        } else if before.trim().is_empty() && builtins::find(builtins::STEPS, word).is_some() {
-            builtins::find(builtins::STEPS, word).map(describe)
-        } else if before.trim() == "left" && word == "join" {
-            builtins::find(builtins::STEPS, "left").map(describe)
+        } else if let Some(keyword) = keyword {
+            Some(describe(keyword))
         } else if let Some(shown) = self.describe_name(word, text, &parsed.file, offset) {
             Some(shown)
         } else if after.starts_with('(') {
@@ -1062,6 +1093,16 @@ impl Server {
         let text = &document.text;
         let parsed = buttercupql::parse(text);
         let lines = Lines::new(text, self.utf8);
+        let symbol = |name: &str, detail: &str, kind: u32, span: Span, selection: Span| {
+            let shown = object([
+                ("name", name.into()),
+                ("detail", detail.into()),
+                ("kind", kind.into()),
+                ("range", lines.range(span)),
+                ("selectionRange", lines.range(selection)),
+            ]);
+            (span.start, shown)
+        };
         let mut symbols = Vec::new();
         for item in &parsed.file.items {
             let (name, kind, span, detail) = match item {
@@ -1081,31 +1122,45 @@ impl Server {
                 Item::Let(named) => (&named.name, CONSTANT_SYMBOL, named.span, "a value"),
                 Item::Import(_) => continue,
             };
-            symbols.push(object([
-                ("name", name.text.as_str().into()),
-                ("detail", detail.into()),
-                ("kind", kind.into()),
-                ("range", lines.range(span)),
-                ("selectionRange", lines.range(name.span)),
-            ]));
+            symbols.push(symbol(&name.text, detail, kind, span, name.span));
+        }
+        for created in created_tables(&parsed.file) {
+            let name = created.name.parts.last().expect("a table has a name");
+            symbols.push(symbol(
+                &name.text,
+                "a table",
+                STRUCT_SYMBOL,
+                created.span,
+                name.span,
+            ));
+        }
+        for (query, change, name) in changes(&parsed.file, text) {
+            symbols.push(symbol(
+                &name,
+                "changes rows",
+                EVENT_SYMBOL,
+                query.span,
+                change.span,
+            ));
         }
         if let Some(query) = &parsed.file.query {
-            symbols.push(object([
-                ("name", "query".into()),
-                ("detail", "the file's query".into()),
-                ("kind", EVENT_SYMBOL.into()),
-                ("range", lines.range(query.span)),
-                (
-                    "selectionRange",
-                    lines.range(Span::empty(query.span.start as usize)),
-                ),
-            ]));
+            let start = Span::empty(query.span.start as usize);
+            symbols.push(symbol(
+                "query",
+                "the file's query",
+                EVENT_SYMBOL,
+                query.span,
+                start,
+            ));
         }
-        Json::Array(symbols)
+        // In the order they are written: definitions and statements come in any order.
+        symbols.sort_by_key(|(start, _)| *start);
+        Json::Array(symbols.into_iter().map(|(_, shown)| shown).collect())
     }
 
-    /// The SQL a file compiles to, for an editor to show beside it: `{"sql", "params", "args", "warnings"}`, or
-    /// `{"problems"}` with each problem as `bcql` shows it.
+    /// The SQL a file compiles to, for an editor to show beside it: `{"sql", "params", "args", "statements",
+    /// "warnings"}`, each statement as `{"sql", "params", "kind"}`, or `{"problems"}` with each problem as `bcql`
+    /// shows it.
     fn compile(&self, params: &Json) -> Json {
         let Some(uri) = params.get("textDocument").get("uri").as_str() else {
             return Json::Null;
@@ -1151,10 +1206,7 @@ impl Server {
                     compiled
                         .params
                         .iter()
-                        .map(|param| match param {
-                            Param::Value(value) => json::value(value),
-                            Param::Arg(name) => object([("arg", name.as_str().into())]),
-                        })
+                        .map(param_json)
                         .collect::<Vec<_>>()
                         .into(),
                 ),
@@ -1168,6 +1220,29 @@ impl Server {
                                 ("name", arg.name.as_str().into()),
                                 ("type", arg.ty.describe().into()),
                                 ("default", arg.default.as_ref().map(json::value).into()),
+                            ])
+                        })
+                        .collect::<Vec<_>>()
+                        .into(),
+                ),
+                (
+                    "statements",
+                    compiled
+                        .statements
+                        .iter()
+                        .map(|statement| {
+                            object([
+                                ("sql", statement.sql.as_str().into()),
+                                (
+                                    "params",
+                                    statement
+                                        .params
+                                        .iter()
+                                        .map(param_json)
+                                        .collect::<Vec<_>>()
+                                        .into(),
+                                ),
+                                ("kind", statement.kind.name().into()),
                             ])
                         })
                         .collect::<Vec<_>>()
@@ -1283,6 +1358,64 @@ fn publish(uri: &str, diagnostics: Vec<Json>) -> Json {
 
 fn location(uri: &str, range: Json) -> Json {
     object([("uri", uri.into()), ("range", range)])
+}
+
+/// What goes in a placeholder, as the editor is sent it.
+fn param_json(param: &Param) -> Json {
+    match param {
+        Param::Value(value) => json::value(value),
+        Param::Arg(name) => object([("arg", name.as_str().into())]),
+    }
+}
+
+/// A file's statements in the order they are written, those in a transaction too.
+fn every_statement(file: &ast::File) -> Vec<&ast::Statement> {
+    fn walk<'f>(statements: &'f [ast::Statement], all: &mut Vec<&'f ast::Statement>) {
+        for statement in statements {
+            all.push(statement);
+            if let ast::StatementKind::Transaction(inner) = &statement.kind {
+                walk(inner, all);
+            }
+        }
+    }
+    let mut all = Vec::new();
+    walk(&file.statements, &mut all);
+    all
+}
+
+/// The tables a file creates.
+fn created_tables(file: &ast::File) -> impl Iterator<Item = &ast::CreateTable> {
+    every_statement(file)
+        .into_iter()
+        .filter_map(|statement| match &statement.kind {
+            ast::StatementKind::CreateTable(table) => Some(table),
+            _ => None,
+        })
+}
+
+/// The queries of a file that change rows, each with its step that changes them and what it is called:
+/// `update cases`, `delete from cases` or `insert into archive`.
+fn changes<'f>(file: &'f ast::File, text: &str) -> Vec<(&'f ast::Query, &'f ast::Step, String)> {
+    let mut found = Vec::new();
+    for statement in every_statement(file) {
+        let ast::StatementKind::Query(query) = &statement.kind else {
+            continue;
+        };
+        let Some(change) = query.steps.iter().find(|step| step.changes()) else {
+            continue;
+        };
+        let table = match query.steps.first().map(|step| &step.kind) {
+            Some(StepKind::From(source)) => &text[source.value.span.range()],
+            _ => "rows",
+        };
+        let name = match &change.kind {
+            StepKind::Insert(into) => format!("insert into {}", &text[into.span.range()]),
+            StepKind::Update(_) => format!("update {table}"),
+            _ => format!("delete from {table}"),
+        };
+        found.push((query, change, name));
+    }
+    found
 }
 
 fn defs(file: &ast::File) -> impl Iterator<Item = &ast::Def> {
@@ -1437,6 +1570,7 @@ const CONSTANT: u32 = 21;
 const FUNCTION_SYMBOL: u32 = 12;
 const VARIABLE_SYMBOL: u32 = 13;
 const CONSTANT_SYMBOL: u32 = 14;
+const STRUCT_SYMBOL: u32 = 23;
 const EVENT_SYMBOL: u32 = 24;
 
 fn item(label: &str, kind: u32, detail: &str, documentation: &str) -> Json {

@@ -45,6 +45,20 @@ for (const example of examples) {
   }
 }
 
+// A text of several statements gives each, with its own placeholders.
+const script = compile(
+  examples.find((example) => example.name === "changing_data").text,
+  "postgres",
+  schema,
+  "",
+);
+assert.deepStrictEqual(
+  script.statements.map((statement) => statement.kind),
+  ["definition", "change", "change"],
+);
+assert.deepStrictEqual(script.statements[2].params, ["stale", "open"]);
+assert.deepStrictEqual(script.statements[2].names, ["p1", "p2"]);
+
 // A mistake comes back with its place, and the memory is given back after each call.
 const before = exports.memory.buffer.byteLength;
 for (let i = 0; i < 2000; i++) {

@@ -1,0 +1,11 @@
+# A recursive query: a row for each of the last seven days, each made from the row before
+week = (
+    from [{"n": 0}]
+) + (
+    from week
+    where n < 6
+    select n = n + 1
+)
+
+from week
+select n, day = today() - days(n)

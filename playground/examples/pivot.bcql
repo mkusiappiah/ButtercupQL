@@ -1,0 +1,6 @@
+# A pivot: for each operator, a column of open cases for each band
+from cases
+where status == "open"
+pivot band in ["critical", "high", "low"] by operator:
+    open = count()
+sort operator

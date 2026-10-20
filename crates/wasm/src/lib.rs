@@ -92,7 +92,8 @@ unsafe fn read(pointer: *const u8, len: usize) -> String {
 /// The answer for a text, as JSON:
 ///
 /// - `ok`: whether it compiled;
-/// - `sql`, `params`, `names`, `args` and `warnings`, when it did;
+/// - `sql`, `params`, `names`, `args`, `statements` and `warnings`, when it did, each statement with its `sql`,
+///   `params`, `names` and `kind`: `query`, `change`, `definition`, `begin` or `commit`;
 /// - `problems`, when it did not, or `schema_problems` for a schema that can't be read;
 /// - `queries`: the named queries and query `def`s that can be compiled in place of the main query;
 /// - `version`.
@@ -141,15 +142,7 @@ pub fn answer(text: &str, dialect: &str, schema: &str, query: &str) -> Json {
             ("sql", compiled.sql.as_str().into()),
             (
                 "params",
-                compiled
-                    .params
-                    .iter()
-                    .map(|param| match param {
-                        Param::Value(value) => json::value(value),
-                        Param::Arg(name) => object([("arg", name.as_str().into())]),
-                    })
-                    .collect::<Vec<_>>()
-                    .into(),
+                compiled.params.iter().map(param).collect::<Vec<_>>().into(),
             ),
             (
                 "names",
@@ -175,6 +168,38 @@ pub fn answer(text: &str, dialect: &str, schema: &str, query: &str) -> Json {
                     .collect::<Vec<_>>()
                     .into(),
             ),
+            (
+                "statements",
+                compiled
+                    .statements
+                    .iter()
+                    .map(|statement| {
+                        object([
+                            ("sql", statement.sql.as_str().into()),
+                            (
+                                "params",
+                                statement
+                                    .params
+                                    .iter()
+                                    .map(param)
+                                    .collect::<Vec<_>>()
+                                    .into(),
+                            ),
+                            (
+                                "names",
+                                statement
+                                    .names
+                                    .iter()
+                                    .map(|name| Json::from(name.as_str()))
+                                    .collect::<Vec<_>>()
+                                    .into(),
+                            ),
+                            ("kind", statement.kind.name().into()),
+                        ])
+                    })
+                    .collect::<Vec<_>>()
+                    .into(),
+            ),
             ("warnings", shown(&compiled.warnings, "query.bcql", text)),
             ("queries", queries),
             ("version", version),
@@ -185,6 +210,14 @@ pub fn answer(text: &str, dialect: &str, schema: &str, query: &str) -> Json {
             ("queries", queries),
             ("version", version),
         ]),
+    }
+}
+
+/// What goes in a placeholder: a value, or `{"arg": name}` for an argument given when the query runs.
+fn param(param: &Param) -> Json {
+    match param {
+        Param::Value(value) => json::value(value),
+        Param::Arg(name) => object([("arg", name.as_str().into())]),
     }
 }
 
@@ -342,6 +375,36 @@ mod tests {
         assert_eq!(
             answer.get("args").to_string(),
             r#"[{"name":"at_least","type":"a whole number","default":90}]"#
+        );
+        let script = call(
+            "create table archive:\n    key: str\n\nfrom cases\nwhere risk > 90\nselect key\ninsert into archive\n",
+            "sqlite",
+            schema,
+            "",
+        );
+        let statements: Vec<(&str, &str)> = script
+            .get("statements")
+            .items()
+            .iter()
+            .map(|statement| {
+                (
+                    statement.get("kind").as_str().unwrap(),
+                    statement.get("sql").as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                (
+                    "definition",
+                    "CREATE TABLE archive (\n  key TEXT NOT NULL\n)"
+                ),
+                (
+                    "change",
+                    "INSERT INTO archive (key)\nSELECT key\nFROM cases\nWHERE risk > 90"
+                ),
+            ]
         );
         let answer = call("from t\n", "oracle", "", "");
         assert_eq!(

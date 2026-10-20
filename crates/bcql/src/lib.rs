@@ -11,7 +11,7 @@ use std::path::Path;
 use buttercupql::ast::{ExprKind, Item, StepKind};
 use buttercupql::{
     Diagnostic, Dialect, FileLoader, Options, Param, ParamStyle, Schema, Severity, SourceFile,
-    StatementKind, Value,
+    Value,
 };
 
 const HELP: &str = "\
@@ -281,7 +281,7 @@ fn compile(args: &[String]) -> Result<u8, String> {
                             "{{\"sql\": {}, \"params\": [{}], \"kind\": {}}}",
                             json_string(&statement.sql),
                             params.join(", "),
-                            json_string(kind_name(statement.kind))
+                            json_string(statement.kind.name())
                         )
                     })
                     .collect();
@@ -494,17 +494,6 @@ fn count(n: usize, word: &str) -> String {
         format!("1 {word}")
     } else {
         format!("{n} {word}s")
-    }
-}
-
-/// What a statement does, as JSON names it.
-pub(crate) fn kind_name(kind: StatementKind) -> &'static str {
-    match kind {
-        StatementKind::Query => "query",
-        StatementKind::Change => "change",
-        StatementKind::Definition => "definition",
-        StatementKind::Begin => "begin",
-        StatementKind::Commit => "commit",
     }
 }
 

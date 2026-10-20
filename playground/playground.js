@@ -6,14 +6,34 @@
 const DIALECTS = { postgres: "PostgreSQL", sqlite: "SQLite", duckdb: "DuckDB", clickhouse: "ClickHouse" };
 
 // The words ButtercupQL colours, as the editor extension colours them.
-const STEPS = new Set(["from", "where", "select", "del", "sort", "take", "skip", "distinct", "group", "summarize", "join", "left", "pass"]);
+const STEPS = new Set([
+  "from", "where", "select", "del", "sort", "take", "skip", "distinct", "group", "summarize", "join", "left", "pass",
+  "update", "delete", "insert", "pivot",
+]);
+// Statements, and the words that follow them on their line.
+const STATEMENTS = new Set(["create", "alter", "drop", "grant", "revoke", "with", "rename"]);
+const STATEMENT_WORDS = {
+  create: ["table", "unique", "index"],
+  alter: ["table"],
+  drop: ["table", "index"],
+  grant: ["to"],
+  revoke: ["from"],
+  with: ["transaction"],
+  rename: ["to"],
+};
+const PRIVILEGES = new Set(["read", "write", "insert", "update", "delete", "all"]);
+// The types of a column or a parameter, written after `:`.
+const TYPES = new Set(["int", "float", "str", "bool", "date", "datetime", "Decimal", "bytes", "Optional"]);
 const WORDS = new Set(["and", "or", "not", "in", "is", "if", "else", "def", "import", "as", "by", "on"]);
 const CONSTANTS = new Set(["True", "False", "None"]);
 const SQL_WORDS = new Set(
   ("SELECT DISTINCT FROM WHERE GROUP BY HAVING ORDER LIMIT OFFSET LEFT INNER JOIN ON AS AND OR NOT IN IS NULL CASE " +
     "WHEN THEN ELSE END OVER PARTITION ROWS RANGE BETWEEN PRECEDING FOLLOWING UNBOUNDED CURRENT ROW FILTER QUALIFY " +
     "INTERVAL CAST NULLS LAST FIRST DESC ASC SETTINGS LIKE GLOB ESCAPE TRUE FALSE WITH EXISTS TIMESTAMP DATE INTEGER " +
-    "BIGINT TEXT REAL NUMERIC DOUBLE PRECISION CURRENT_DATE DAY DAYS HOUR MINUTE SECOND").split(" "),
+    "BIGINT TEXT REAL NUMERIC DOUBLE PRECISION CURRENT_DATE DAY DAYS HOUR MINUTE SECOND RECURSIVE UNION INTERSECT " +
+    "EXCEPT ALL INSERT INTO VALUES UPDATE SET DELETE RETURNING CREATE TABLE INDEX UNIQUE PRIMARY KEY REFERENCES " +
+    "DEFAULT ALTER ADD COLUMN DROP RENAME TO IF GRANT REVOKE BEGIN COMMIT REPLACE FUNCTION PROCEDURE MACRO VIEW " +
+    "RETURNS SETOF LANGUAGE STABLE ATOMIC ENGINE BOOLEAN VARCHAR BLOB BYTEA DECIMAL").split(" "),
 );
 
 const $ = (id) => document.getElementById(id);
@@ -29,6 +49,10 @@ function highlightQuery(text) {
   let html = "";
   let lineStart = true;
   let previous = "";
+  // The word the line starts with, and whether the token before was an `@`, or a `:`.
+  let first = "";
+  let decorator = false;
+  let colon = false;
   let match;
   token.lastIndex = 0;
   while ((match = token.exec(text)) !== null) {
@@ -46,11 +70,25 @@ function highlightQuery(text) {
       lineStart = false;
     } else if (word !== undefined) {
       const after = text.slice(token.lastIndex).match(/^[^\S\n]*(.)/);
+      if (lineStart) {
+        first = word;
+      }
+      const statement =
+        (lineStart && STATEMENTS.has(word)) || (!lineStart && (STATEMENT_WORDS[first] || []).includes(word));
       const step =
-        (lineStart && STEPS.has(word)) || (word === "by" && previous === "group") || (word === "join" && previous === "left");
+        (lineStart && STEPS.has(word)) ||
+        (word === "by" && (previous === "group" || first === "pivot")) ||
+        (word === "join" && previous === "left") ||
+        (word === "into" && previous === "insert");
       let kind = "";
-      if (step) {
+      if (decorator) {
+        kind = "t-function";
+      } else if (colon && TYPES.has(word) && !(after && after[1] === "(")) {
+        kind = "t-constant";
+      } else if (step || statement) {
         kind = "t-step";
+      } else if ((first === "grant" || first === "revoke") && PRIVILEGES.has(word)) {
+        kind = "t-keyword";
       } else if (CONSTANTS.has(word)) {
         kind = "t-constant";
       } else if (WORDS.has(word)) {
@@ -61,13 +99,18 @@ function highlightQuery(text) {
       html += kind ? `<span class="${kind}">${word}</span>` : word;
       previous = step ? word : "";
       lineStart = false;
+      decorator = false;
+      colon = false;
     } else if (newline !== undefined) {
       html += "\n";
       lineStart = true;
+      first = "";
     } else if (space !== undefined) {
       html += space;
     } else {
-      html += escape(whole);
+      decorator = whole === "@" && lineStart;
+      colon = whole === ":";
+      html += decorator ? `<span class="t-function">@</span>` : escape(whole);
       lineStart = whole === ";";
     }
   }
@@ -342,13 +385,19 @@ async function main() {
     const params = $("params");
     if (answer.ok && (answer.params.length > 0 || answer.args.length > 0)) {
       let html = "";
-      if (answer.params.length > 0) {
-        html += '<table><tr><td class="label" colspan="2">Parameters</td></tr>';
-        answer.params.forEach((value, i) => {
-          html += `<tr><td class="t-param">${escape(placeholder(dialect.value, i, answer.names[i]))}</td><td>${shownValue(value)}</td></tr>`;
+      // A text of several statements: each runs on its own, with its own placeholders.
+      const statements = answer.statements && answer.statements.length > 1 ? answer.statements : [answer];
+      statements.forEach((statement, n) => {
+        if (statement.params.length === 0) {
+          return;
+        }
+        const label = statements.length > 1 ? `Parameters of statement ${n + 1}` : "Parameters";
+        html += `<table><tr><td class="label" colspan="2">${label}</td></tr>`;
+        statement.params.forEach((value, i) => {
+          html += `<tr><td class="t-param">${escape(placeholder(dialect.value, i, statement.names[i]))}</td><td>${shownValue(value)}</td></tr>`;
         });
         html += "</table>";
-      }
+      });
       if (answer.args.length > 0) {
         html += '<table><tr><td class="label" colspan="2">Arguments, given when the query runs</td></tr>';
         for (const arg of answer.args) {

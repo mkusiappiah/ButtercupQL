@@ -7,6 +7,7 @@
     { "include": "#comment" },
     { "include": "#import" },
     { "include": "#def" },
+    { "include": "#statements" },
     { "include": "#steps" },
     { "include": "#expression" }
   ],
@@ -43,6 +44,75 @@
         "2": { "name": "entity.name.function.buttercupql" }
       }
     },
+    "statements": {
+      "patterns": [
+        {
+          "match": "^\\s*(create)\\s+(table)\\s+([\\p{L}_][\\p{L}\\p{N}_.]*)",
+          "captures": {
+            "1": { "name": "keyword.control.statement.buttercupql" },
+            "2": { "name": "keyword.control.statement.buttercupql" },
+            "3": { "name": "entity.name.type.table.buttercupql" }
+          }
+        },
+        {
+          "match": "^\\s*(create)\\s+(?:(unique)\\s+)?(index)\\b",
+          "captures": {
+            "1": { "name": "keyword.control.statement.buttercupql" },
+            "2": { "name": "keyword.control.statement.buttercupql" },
+            "3": { "name": "keyword.control.statement.buttercupql" }
+          }
+        },
+        {
+          "match": "^\\s*(alter)\\s+(table)\\s+([\\p{L}_][\\p{L}\\p{N}_.]*)",
+          "captures": {
+            "1": { "name": "keyword.control.statement.buttercupql" },
+            "2": { "name": "keyword.control.statement.buttercupql" },
+            "3": { "name": "entity.name.type.table.buttercupql" }
+          }
+        },
+        {
+          "match": "^\\s*(drop)\\s+(table|index)\\b",
+          "captures": {
+            "1": { "name": "keyword.control.statement.buttercupql" },
+            "2": { "name": "keyword.control.statement.buttercupql" }
+          }
+        },
+        {
+          "match": "^\\s*(rename)\\s+([\\p{L}_][\\p{L}\\p{N}_]*)\\s+(to)\\b",
+          "captures": {
+            "1": { "name": "keyword.control.statement.buttercupql" },
+            "2": { "name": "variable.other.buttercupql" },
+            "3": { "name": "keyword.control.statement.buttercupql" }
+          }
+        },
+        {
+          "match": "^\\s*(with)\\s+(transaction)\\b",
+          "captures": {
+            "1": { "name": "keyword.control.statement.buttercupql" },
+            "2": { "name": "keyword.control.statement.buttercupql" }
+          }
+        },
+        {
+          "begin": "^\\s*(grant|revoke)\\b",
+          "end": "$",
+          "beginCaptures": { "1": { "name": "keyword.control.statement.buttercupql" } },
+          "patterns": [
+            { "include": "#comment" },
+            { "match": "\\b(on|to|from)\\b", "name": "keyword.control.statement.buttercupql" },
+            { "match": "\\b(read|write|insert|update|delete|all)\\b", "name": "storage.modifier.privilege.buttercupql" },
+            { "include": "#expression" }
+          ]
+        },
+        {
+          "match": "^\\s*(@)\\s*([\\p{L}_][\\p{L}\\p{N}_]*)",
+          "name": "meta.function.decorator.buttercupql",
+          "captures": {
+            "1": { "name": "punctuation.definition.decorator.buttercupql" },
+            "2": { "name": "entity.name.function.decorator.buttercupql" }
+          }
+        }
+      ]
+    },
     "steps": {
       "patterns": [
         {
@@ -60,7 +130,23 @@
           }
         },
         {
-          "match": "(?:^|;)\\s*(from|where|select|del|sort|take|skip|distinct|summarize|pass)\\b(?!\\s*(?:[-+*/%=<>!]?=|\\.|\\())",
+          "match": "(?:^|;)\\s*(insert)\\s+(into)\\b",
+          "captures": {
+            "1": { "name": "keyword.control.step.buttercupql" },
+            "2": { "name": "keyword.control.step.buttercupql" }
+          }
+        },
+        {
+          "begin": "(?:^|;)\\s*(pivot)\\b",
+          "end": "$",
+          "beginCaptures": { "1": { "name": "keyword.control.step.buttercupql" } },
+          "patterns": [
+            { "match": "\\b(by)\\b", "name": "keyword.control.step.buttercupql" },
+            { "include": "#expression" }
+          ]
+        },
+        {
+          "match": "(?:^|;)\\s*(from|where|select|del|sort|take|skip|distinct|summarize|pass|update|delete)\\b(?!\\s*(?:[-+*/%=<>!]?=|\\.|\\())",
           "captures": { "1": { "name": "keyword.control.step.buttercupql" } }
         },
         {
@@ -77,6 +163,7 @@
         { "include": "#number" },
         { "include": "#constant" },
         { "include": "#operator-word" },
+        { "include": "#annotation" },
         { "include": "#call" },
         { "include": "#operator" },
         { "include": "#brackets" },
@@ -164,6 +251,13 @@
       "match": "\\b(True|False|None)\\b",
       "name": "constant.language.buttercupql"
     },
+    "annotation": {
+      "match": "(:)\\s*(int|float|str|bool|date|datetime|Decimal|bytes|Optional)\\b(?!\\s*\\()",
+      "captures": {
+        "1": { "name": "punctuation.separator.colon.buttercupql" },
+        "2": { "name": "support.type.buttercupql" }
+      }
+    },
     "operator-word": {
       "match": "\\b(and|or|not|in|is|if|else)\\b",
       "name": "keyword.operator.logical.buttercupql"
@@ -193,6 +287,7 @@
       "patterns": [
         { "match": "==|!=|<=|>=|<|>", "name": "keyword.operator.comparison.buttercupql" },
         { "match": "\\*\\*|//|[-+*/%]", "name": "keyword.operator.arithmetic.buttercupql" },
+        { "match": "[|&]", "name": "keyword.operator.combine.buttercupql" },
         { "match": "[-+*/%]?=", "name": "keyword.operator.assignment.buttercupql" },
         { "match": ":", "name": "punctuation.separator.colon.buttercupql" },
         { "match": ",", "name": "punctuation.separator.element.buttercupql" },

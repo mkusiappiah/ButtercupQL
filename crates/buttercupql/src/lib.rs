@@ -236,6 +236,19 @@ pub enum StatementKind {
     Commit,
 }
 
+impl StatementKind {
+    /// Its name, as JSON gives it: `query`, `change`, `definition`, `begin` or `commit`.
+    pub fn name(self) -> &'static str {
+        match self {
+            StatementKind::Query => "query",
+            StatementKind::Change => "change",
+            StatementKind::Definition => "definition",
+            StatementKind::Begin => "begin",
+            StatementKind::Commit => "commit",
+        }
+    }
+}
+
 /// A text compiled to SQL.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Compiled {

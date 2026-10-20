@@ -50,6 +50,24 @@ select key, risk, label = f"{key}: {risk}"
 def recent(days_back=7):
     """The rows raised in the last days."""
     where \`from\` == None
+create table archive:
+    key: str = field(primary_key=True)
+    risk: int | None
+alter table archive:
+    rename risk to score
+@stored
+def risky(at_least: int):
+    from cases
+grant read, write on archive to analyst
+revoke write on archive from analyst
+with transaction:
+    from cases
+    where risk > 90
+    update status = "urgent"
+    delete
+    insert into archive
+pivot band in ["critical"] by operator:
+    n = count()
 `;
 
 // A word, which of its appearances, and a scope it must have.
@@ -86,6 +104,39 @@ const EXPECTED = [
   ["where", 2, "keyword.control.step.buttercupql"],
   ["from", 2, "variable.other.quoted.buttercupql"],
   ["None", 0, "constant.language.buttercupql"],
+  ["create", 0, "keyword.control.statement.buttercupql"],
+  ["table", 0, "keyword.control.statement.buttercupql"],
+  ["archive", 0, "entity.name.type.table.buttercupql"],
+  ["str", 0, "support.type.buttercupql"],
+  ["primary_key", 0, "variable.parameter.function-call.buttercupql"],
+  ["int", 0, "support.type.buttercupql"],
+  ["|", 0, "keyword.operator.combine.buttercupql"],
+  ["None", 1, "constant.language.buttercupql"],
+  ["alter", 0, "keyword.control.statement.buttercupql"],
+  ["archive", 1, "entity.name.type.table.buttercupql"],
+  ["rename", 0, "keyword.control.statement.buttercupql"],
+  ["to", 0, "keyword.control.statement.buttercupql"],
+  ["@", 0, "punctuation.definition.decorator.buttercupql"],
+  ["stored", 0, "entity.name.function.decorator.buttercupql"],
+  ["risky", 0, "entity.name.function.buttercupql"],
+  ["int", 1, "support.type.buttercupql"],
+  ["grant", 0, "keyword.control.statement.buttercupql"],
+  ["read", 0, "storage.modifier.privilege.buttercupql"],
+  ["write", 0, "storage.modifier.privilege.buttercupql"],
+  ["on", 0, "keyword.control.statement.buttercupql"],
+  ["analyst", 0, "variable.other.buttercupql"],
+  ["revoke", 0, "keyword.control.statement.buttercupql"],
+  ["from", 4, "keyword.control.statement.buttercupql"],
+  ["with", 0, "keyword.control.statement.buttercupql"],
+  ["transaction", 0, "keyword.control.statement.buttercupql"],
+  ["from", 5, "keyword.control.step.buttercupql"],
+  ["update", 0, "keyword.control.step.buttercupql"],
+  ["delete", 0, "keyword.control.step.buttercupql"],
+  ["insert", 0, "keyword.control.step.buttercupql"],
+  ["into", 0, "keyword.control.step.buttercupql"],
+  ["pivot", 0, "keyword.control.step.buttercupql"],
+  ["in", 1, "keyword.operator.logical.buttercupql"],
+  ["by", 1, "keyword.control.step.buttercupql"],
 ];
 
 load()

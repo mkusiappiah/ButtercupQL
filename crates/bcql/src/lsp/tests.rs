@@ -640,6 +640,88 @@ fn the_files_definitions_are_listed() {
     );
 }
 
+const SCRIPT: &str = "create table archive:\n    key: str = field(primary_key=True)\n    risk: int | None\n\n@stored\ndef risky(at_least: int):\n    from cases\n    where risk >= at_least\n\nfrom cases\nwhere status == \"closed\"\ninsert into archive\n";
+
+#[test]
+fn statements_are_completed_described_and_listed() {
+    let (mut server, folder) = with_schema("statements");
+    let uri = uri_of(&folder.join("script.bcql"));
+    open(&mut server, &uri, SCRIPT);
+
+    let words_items = result(&mut server, "textDocument/completion", at(&uri, 12, 0));
+    let words = labels(&words_items);
+    for word in [
+        "create", "alter", "drop", "grant", "revoke", "with", "update", "delete", "insert", "pivot",
+    ] {
+        assert!(words.contains(&word), "{word} is not in {words:?}");
+    }
+
+    let decorated = uri_of(&folder.join("decorated.bcql"));
+    open(&mut server, &decorated, &format!("{SCRIPT}@"));
+    let decorators = result(
+        &mut server,
+        "textDocument/completion",
+        at(&decorated, 12, 1),
+    );
+    assert_eq!(labels(&decorators), ["stored"]);
+
+    let inserting = uri_of(&folder.join("inserting.bcql"));
+    open(&mut server, &inserting, &format!("{SCRIPT}grant read on "));
+    let tables_items = result(
+        &mut server,
+        "textDocument/completion",
+        at(&inserting, 12, 14),
+    );
+    assert_eq!(labels(&tables_items), ["accounts", "cases", "archive"]);
+
+    let hover = |server: &mut Server, line, character| {
+        let shown = result(server, "textDocument/hover", at(&uri, line, character));
+        shown
+            .get("contents")
+            .get("value")
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    let create = hover(&mut server, 0, 2);
+    assert!(
+        create.contains("create table cases:") && create.contains("Python annotations"),
+        "{create}"
+    );
+    let stored = hover(&mut server, 4, 3);
+    assert!(
+        stored.contains("@stored") && stored.contains("Keep the def in the database"),
+        "{stored}"
+    );
+    let insert = hover(&mut server, 11, 2);
+    assert!(insert.contains("insert into archive"), "{insert}");
+
+    let symbols = result(
+        &mut server,
+        "textDocument/documentSymbol",
+        object([("textDocument", object([("uri", uri.as_str().into())]))]),
+    );
+    let listed: Vec<(&str, &str)> = symbols
+        .items()
+        .iter()
+        .map(|symbol| {
+            (
+                symbol.get("name").as_str().unwrap(),
+                symbol.get("detail").as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            ("archive", "a table"),
+            ("risky", "a query"),
+            ("insert into archive", "changes rows")
+        ]
+    );
+    let _ = std::fs::remove_dir_all(folder);
+}
+
 #[test]
 fn the_sql_is_given_for_an_editor_to_show() {
     let (mut server, folder) = with_schema("compile");
@@ -694,6 +776,52 @@ fn the_sql_is_given_for_an_editor_to_show() {
     );
     let shown = failed.get("problems").items()[0].as_str().unwrap();
     assert!(shown.contains("did you mean `status`?"), "{shown}");
+
+    server.handle(&notify(
+        "textDocument/didChange",
+        object([
+            ("textDocument", object([("uri", uri.as_str().into())])),
+            (
+                "contentChanges",
+                vec![object([(
+                    "text",
+                    "with transaction:\n    from cases\n    where risk > 90\n    update status = \"urgent\"\n\nfrom cases\nwhere status == \"urgent\"\n".into(),
+                )])]
+                .into(),
+            ),
+        ]),
+    ));
+    let script = result(
+        &mut server,
+        "buttercupql/compile",
+        object([("textDocument", object([("uri", uri.as_str().into())]))]),
+    );
+    let statements: Vec<(&str, &str)> = script
+        .get("statements")
+        .items()
+        .iter()
+        .map(|statement| {
+            (
+                statement.get("kind").as_str().unwrap(),
+                statement.get("sql").as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        statements,
+        [
+            ("begin", "BEGIN"),
+            ("change", "UPDATE cases SET status = ?\nWHERE risk > 90"),
+            ("commit", "COMMIT"),
+            ("query", "SELECT *\nFROM cases\nWHERE status = ?"),
+        ]
+    );
+    assert_eq!(
+        script.get("statements").items()[1]
+            .get("params")
+            .to_string(),
+        r#"["urgent"]"#
+    );
     let _ = std::fs::remove_dir_all(folder);
 }
 

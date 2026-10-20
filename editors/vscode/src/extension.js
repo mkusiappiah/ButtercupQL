@@ -135,13 +135,28 @@ class SqlView {
     if (compiled.problems) {
       return `-- The query does not compile:\n--\n${compiled.problems.map(commented).join("\n--\n")}\n`;
     }
-    const lines = [compiled.sql];
-    if (compiled.params.length > 0) {
-      lines.push(`-- parameters: [${compiled.params.map(shownParam).join(", ")}]`);
-    }
-    if (compiled.args.length > 0) {
-      const args = compiled.args.map((arg) => (arg.default === null ? arg.name : `${arg.name} = ${JSON.stringify(arg.default)}`));
-      lines.push(`-- arguments: ${args.join(", ")}`);
+    const lines = [];
+    const statements = compiled.statements || [];
+    if (statements.length > 1) {
+      // Several statements, each ended with `;` and with its own parameters: they run one by one.
+      statements.forEach((statement, n) => {
+        if (n > 0) {
+          lines.push("");
+        }
+        lines.push(`${statement.sql};`);
+        if (statement.params.length > 0) {
+          lines.push(`-- parameters: [${statement.params.map(shownParam).join(", ")}]`);
+        }
+      });
+    } else {
+      lines.push(compiled.sql);
+      if (compiled.params.length > 0) {
+        lines.push(`-- parameters: [${compiled.params.map(shownParam).join(", ")}]`);
+      }
+      if (compiled.args.length > 0) {
+        const args = compiled.args.map((arg) => (arg.default === null ? arg.name : `${arg.name} = ${JSON.stringify(arg.default)}`));
+        lines.push(`-- arguments: ${args.join(", ")}`);
+      }
     }
     for (const warning of compiled.warnings) {
       lines.push("--", commented(warning));

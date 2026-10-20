@@ -279,7 +279,7 @@ impl<'a> Compiler<'a> {
             if let StepKind::From(source) = &first.kind {
                 if let ExprKind::List(rows) = &source.value.kind {
                     let (columns, values) = self.literal_rows(rows)?;
-                    self.check_columns(&columns, known, &name, source.value.span)?;
+                    self.check_columns(&columns, known, &name, source.value.span, None)?;
                     return Some(Statement::Insert {
                         table,
                         columns,
@@ -296,8 +296,17 @@ impl<'a> Compiler<'a> {
         } else {
             rel.frame.visible().map(|col| col.name.clone()).collect()
         };
-        let span = before.last().map_or(target.span, |step| step.span);
-        self.check_columns(&columns, known, &name, span)?;
+        // A `select` chose the columns; otherwise they are the table's that the rows came from.
+        let (span, help) = match before.last() {
+            Some(step) if matches!(step.kind, StepKind::Select(_)) => (step.span, None),
+            _ => (
+                target.span,
+                Some(
+                    "the rows go in by their columns' names: choose the columns with a `select` before `insert into`",
+                ),
+            ),
+        };
+        self.check_columns(&columns, known, &name, span, help)?;
         let select = self.finish(rel);
         Some(Statement::Insert {
             table,
@@ -314,6 +323,7 @@ impl<'a> Compiler<'a> {
         table: Option<&crate::schema::Table>,
         name: &str,
         span: Span,
+        help: Option<&str>,
     ) -> Option<()> {
         let Some(table) = table else {
             return Some(());
@@ -330,6 +340,9 @@ impl<'a> Compiler<'a> {
                     self.error(span, format!("there is no column `{column}` in `{name}`"));
                 if let Some(best) = suggest::closest(column, names.iter().copied()) {
                     problem = problem.with_label(format!("did you mean `{best}`?"));
+                }
+                if let Some(help) = help {
+                    problem = problem.with_help(help);
                 }
                 self.report(problem);
                 ok = false;

@@ -98,7 +98,7 @@ pub const STATEMENTS: &[Builtin] = &[
     builtin(
         "create",
         "create table cases:",
-        "Create a table, its columns written as Python annotations below: `risk: int | None`. `create index on cases(-risk)` creates an index.",
+        "Create a table, its columns written below as Python annotations: `name: type`. `create index on cases(-risk)` creates an index.",
     ),
     builtin(
         "alter",
@@ -126,6 +126,13 @@ pub const STATEMENTS: &[Builtin] = &[
         "Run the statements below together: all of them, or none if one fails.",
     ),
 ];
+
+/// What is written with `@` on the line before a `def`.
+pub const DECORATORS: &[Builtin] = &[builtin(
+    "stored",
+    "@stored",
+    "Keep the def in the database, to be run by its name: a query as a function, a macro or a view, and on PostgreSQL a def that changes rows as a procedure.",
+)];
 
 /// The functions.
 pub const FUNCTIONS: &[Builtin] = &[
@@ -338,6 +345,7 @@ mod tests {
         for builtin in STEPS
             .iter()
             .chain(STATEMENTS)
+            .chain(DECORATORS)
             .chain(FUNCTIONS)
             .chain(METHODS)
             .chain(DATE_PARTS)
