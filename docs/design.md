@@ -33,6 +33,7 @@ FROM cases
 WHERE status = $1 AND band IN ($2, $3) AND raised > now() - INTERVAL '7 days'
 ORDER BY risk DESC NULLS LAST
 LIMIT 20
+-- parameters: ["open", "critical", "high"]
 ```
 
 with the parameters `["open", "critical", "high"]`. Missing values sort last on every database, so cases with no risk
@@ -225,7 +226,7 @@ SQL would quietly return no rows.
 
 The SQL text and its parameters, in order. From Python:
 
-```python
+```py
 import buttercupql
 
 query = buttercupql.compile(text, dialect="postgres")
@@ -275,8 +276,8 @@ Every error found is reported at once, each pointing at its place, rather than o
 - **Each database's own forms:** `FILTER (WHERE ...)` or `countIf`, and `QUALIFY` where the database has it.
 - **Parameters,** so databases can reuse a query's plan. `literal(x)` writes a value into the SQL instead, for the cases
   where a partial index needs to see it.
-- **Patterns an index can use.** `name.startswith("A")` is `name LIKE 'A%'` on PostgreSQL and `name GLOB 'A*'` on
-  SQLite, with any wildcard in the text made plain.
+- **Patterns an index can use.** `name.startswith("A")` is `name LIKE $1` on PostgreSQL and `name GLOB ?` on SQLite,
+  with the pattern `A%` or `A*` as the parameter's value and any wildcard in the text made plain.
 - **Sorting with missing values last.** PostgreSQL can serve `ORDER BY risk DESC NULLS LAST` from an index made the same
   way, `CREATE INDEX ON cases (risk DESC NULLS LAST)`, or from a plain index when the column is `NOT NULL` and the schema
   says so.

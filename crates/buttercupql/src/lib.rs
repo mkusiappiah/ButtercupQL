@@ -61,6 +61,11 @@ pub use sql::{Param, ParamStyle, Value};
 /// The version of this crate.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// The book's Rust chapter, whose examples run as this crate's documentation tests.
+#[cfg(doctest)]
+#[doc = include_str!("../../../docs/book/src/rust.md")]
+struct BookRustChapter;
+
 /// A ButtercupQL text read into its syntax tree, with every problem found in it.
 #[derive(Debug, Clone)]
 pub struct Parsed {

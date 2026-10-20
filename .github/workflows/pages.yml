@@ -1,0 +1,57 @@
+name: Pages
+
+# The book and the playground, published on GitHub Pages: the book at the site's root, the playground in
+# /playground.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build the book and the playground
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: The compiler, built for WebAssembly
+        run: cargo build -p buttercupql-wasm --target wasm32-unknown-unknown --profile wasm
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: mdBook
+        run: |
+          curl -sSfL -o mdbook.tar.gz https://github.com/rust-lang/mdBook/releases/download/v0.5.4/mdbook-v0.5.4-x86_64-unknown-linux-gnu.tar.gz
+          echo "3f28de05dafca9d0f2eab99c662116b0e37b89b1d96a08f8f430b9eeae958cd7  mdbook.tar.gz" | sha256sum -c -
+          tar -xzf mdbook.tar.gz
+      - name: The site
+        run: |
+          ./mdbook build docs/book -d "$PWD/site"
+          node playground/build.mjs target/wasm32-unknown-unknown/wasm/buttercupql_wasm.wasm site/playground
+          node playground/test.mjs site/playground
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+  deploy:
+    name: Publish
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

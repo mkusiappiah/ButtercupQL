@@ -1,0 +1,28 @@
+/* The buttercup's colours on the book's own themes. */
+:root {
+  --buttercup: #e9a800;
+}
+
+.light,
+.rust {
+  --links: #1f6b4a;
+  --sidebar-active: #1f6b4a;
+}
+
+.navy,
+.coal,
+.ayu {
+  --links: #f4c430;
+  --sidebar-active: #f4c430;
+}
+
+.chapter li.part-title {
+  color: var(--buttercup);
+}
+
+.buttercup-logo {
+  width: 72px;
+  height: 72px;
+  float: right;
+  margin: 0 0 12px 24px;
+}

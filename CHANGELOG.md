@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- The book, at <https://mkusiappiah.github.io/ButtercupQL/>: a guide to the language and its reference, published with
+  the playground on GitHub Pages. The tests check every example in it, and in the README and the design: each query
+  compiles to the SQL shown, each mistake gets the message shown, and the Python and Rust examples run.
 - The playground: ButtercupQL compiled in the browser, built for WebAssembly (`crates/wasm`, 454 KB). It shows the SQL
   for each database as you type, underlines each mistake with its message, compiles a query `def` on its own with
   its arguments, checks names against a schema, and shares a query as a link.

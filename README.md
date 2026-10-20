@@ -7,6 +7,9 @@
 Write a query the way you would write Python, one step per line in the order the data flows. ButtercupQL compiles it to
 the SQL your database already runs: SQLite, PostgreSQL, DuckDB and ClickHouse.
 
+**[Read the book](https://mkusiappiah.github.io/ButtercupQL/)** · **[Try it in the playground](https://mkusiappiah.github.io/ButtercupQL/playground/)**,
+in your browser, with nothing to install
+
 ```python
 # Critical cases nobody has taken, riskiest first
 from cases
@@ -25,6 +28,7 @@ FROM cases
 WHERE status = $1 AND band IN ($2, $3) AND raised > now() - INTERVAL '7 days'
 ORDER BY risk DESC NULLS LAST
 LIMIT 20
+-- parameters: ["open", "critical", "high"]
 ```
 
 on PostgreSQL, with the values `"open"`, `"critical"` and `"high"` passed as parameters, never pasted into the SQL.
@@ -173,7 +177,7 @@ where a name is defined, in an imported module too.
 pip install git+https://github.com/mkusiappiah/ButtercupQL   # built with Rust, which must be installed
 ```
 
-```python
+```py
 import sqlite3
 import buttercupql
 
@@ -199,7 +203,9 @@ On failure, `compile` returns every problem found; `render` shows one as `bcql` 
 ## Status
 
 The language design is approved: [docs/design.md](docs/design.md) describes it, and
-[docs/research.md](docs/research.md) the research behind it. The compiler is built for SQLite, PostgreSQL, DuckDB and
+[docs/research.md](docs/research.md) the research behind it. [The book](https://mkusiappiah.github.io/ButtercupQL/)
+teaches the language and is its reference; its source is in [docs/book](docs/book), and every example in it is
+checked by the tests. The compiler is built for SQLite, PostgreSQL, DuckDB and
 ClickHouse. Each example compiles to the SQL kept beside it in [examples/](examples), and the test suite runs its
 queries on all four databases.
 

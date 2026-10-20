@@ -1,0 +1,18 @@
+[book]
+title = "ButtercupQL"
+description = "ButtercupQL, a Python-like language for SQL: the guide and the reference."
+authors = ["Michael Kusi-Appiah"]
+language = "en"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/mkusiappiah/ButtercupQL"
+edit-url-template = "https://github.com/mkusiappiah/ButtercupQL/edit/main/docs/book/{path}"
+site-url = "/ButtercupQL/"
+default-theme = "light"
+preferred-dark-theme = "navy"
+additional-css = ["theme/buttercup.css"]
+additional-js = ["theme/buttercupql.js"]
+
+[output.html.playground]
+runnable = false

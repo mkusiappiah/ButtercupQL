@@ -40,9 +40,9 @@ Options:
   --json            Write the SQL and its parameters as JSON
   --color WHEN      Colour the messages: auto, always or never [default: auto]
 
-A FILE of `-` is read from standard input. Both commands exit with 0 when
-there is no error, with 1 when there is one, and with 2 when the command is
-wrong.
+A FILE of `-` is read from standard input. `compile` and `check` exit with 0
+when there is no error, with 1 when there is one, and with 2 when the command
+is wrong.
 ";
 
 /// The exit codes: no error, an error in what was read, and a command written wrongly.
