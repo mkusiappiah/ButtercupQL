@@ -21,6 +21,7 @@
 - [The databases](databases.md)
 - [The bcql command](command.md)
 - [Python](python.md)
+- [Notebooks](notebooks.md)
 - [Rust](rust.md)
 - [Editors](editors.md)
 - [The playground](playground.md)

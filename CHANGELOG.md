@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Added
+
+- Python: `buttercupql.run(connection, text)` compiles a text for the database a connection is to and runs it with
+  the database's own driver (`sqlite3`, `psycopg`, `psycopg2`, `pg8000`, `duckdb`, or a `clickhouse_connect`
+  client), as one transaction, and gives the rows with their columns' names. `read_schema(connection)` reads the
+  database's tables and the links between them. `Compiled.statements` gives each statement of a text.
+- Notebooks: `%load_ext buttercupql`, then a cell under `%%bcql db` runs on the connection `db` and shows its rows,
+  as a pandas DataFrame when pandas is installed, with its names checked against the database's own tables first.
+
 ### Fixed
 
 - A sort before a `select` that gives a column the name of one it reads, as in `sort risk` and then

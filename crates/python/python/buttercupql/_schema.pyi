@@ -1,0 +1,3 @@
+from ._buttercupql import Schema
+
+def read_schema(connection: object) -> Schema: ...

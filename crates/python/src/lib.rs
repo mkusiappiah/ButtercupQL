@@ -176,6 +176,19 @@ impl Compiled {
         self.inner.names.clone()
     }
 
+    /// Each statement, to run one by one in order: one for a query, and for a text that changes the database, each
+    /// of its changes and queries.
+    #[getter]
+    fn statements(&self) -> Vec<Statement> {
+        self.inner
+            .statements
+            .iter()
+            .map(|statement| Statement {
+                inner: statement.clone(),
+            })
+            .collect()
+    }
+
     /// The query's arguments, for a `def` compiled with `query=`.
     #[getter]
     fn args(&self) -> Vec<Arg> {
@@ -237,6 +250,55 @@ impl Compiled {
 
     fn __repr__(&self) -> String {
         format!("<Compiled {:?}>", self.inner.sql)
+    }
+}
+
+/// One statement of a compiled text: its SQL, and the values for its placeholders.
+#[pyclass(frozen, module = "buttercupql")]
+struct Statement {
+    inner: core::Statement,
+}
+
+#[pymethods]
+impl Statement {
+    /// The SQL, with no `;` at its end.
+    #[getter]
+    fn sql(&self) -> &str {
+        &self.inner.sql
+    }
+
+    /// The values for the placeholders, in order.
+    #[getter]
+    fn params(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let values = self.inner.values().map_err(|error| {
+            PyValueError::new_err(format!("{error}: give it with the query's bind()"))
+        })?;
+        values_list(py, &values)
+    }
+
+    /// Each placeholder's name, in order.
+    #[getter]
+    fn names(&self) -> Vec<String> {
+        self.inner.names.clone()
+    }
+
+    /// What it does: `"query"` gives rows, `"change"` changes them, `"definition"` changes the database itself, and
+    /// `"begin"` and `"commit"` start and end statements that run together.
+    #[getter]
+    fn kind(&self) -> &'static str {
+        self.inner.kind.name()
+    }
+
+    fn __str__(&self) -> &str {
+        &self.inner.sql
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "<Statement {} {:?}>",
+            self.inner.kind.name(),
+            self.inner.sql
+        )
     }
 }
 
@@ -574,6 +636,7 @@ fn _buttercupql(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Diagnostic>()?;
     module.add_class::<Arg>()?;
     module.add_class::<Compiled>()?;
+    module.add_class::<Statement>()?;
     module.add_class::<Schema>()?;
     module.add_function(wrap_pyfunction!(compile, module)?)?;
     module.add_function(wrap_pyfunction!(check, module)?)?;

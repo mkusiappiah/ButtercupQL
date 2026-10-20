@@ -47,6 +47,91 @@ query = buttercupql.compile('from cases\nwhere status == "open"\n', params="form
 assert query.sql.endswith("WHERE status = %s")
 ```
 
+## Running on a database
+
+`run()` compiles a text and runs it with the database's own driver, and gives the rows of its query: a list of
+tuples, as `fetchall()` gives them, with the names of the columns in `columns`.
+
+```py
+rows = buttercupql.run(db, """
+    from cases
+    where status == "open"
+    sort -risk
+    select key, risk
+""")
+assert rows == [("C1", 95), ("C2", 40), ("C4", None)]
+assert rows.columns == ["key", "risk"]
+```
+
+The driver says which database it is, and which placeholders it takes: `sqlite3`; `psycopg`, `psycopg2` or `pg8000`
+for PostgreSQL; `duckdb`; or a `clickhouse_connect` client. For another DB-API driver, `dialect=` names the
+database. `rows.to_pandas()` gives the rows as a pandas DataFrame.
+
+A text that changes the database runs statement by statement, in order, as one transaction: all of it, or none of it
+if a statement fails. ClickHouse has no transactions, so there each statement stands once it has run. The rows given
+are the last query's:
+
+```py
+rows = buttercupql.run(db, """
+    create table archive:
+        key: str = field(primary_key=True)
+        risk: int | None
+
+    from cases
+    where status == "closed"
+    select key, risk
+    insert into archive
+
+    from cases
+    where status == "closed"
+    delete
+
+    from archive
+""")
+assert rows == [("C3", 90)]
+```
+
+`query=` runs a query `def` of the text, with its arguments given by name, as [`bind()`](#queries-with-arguments)
+takes them.
+
+## The database's own tables
+
+`read_schema()` reads the tables of the database a connection is to, with their columns and the links between them,
+for names to be checked against: a `Schema` for `schema=`.
+
+```py
+schema = buttercupql.read_schema(db)
+assert schema.tables == ["archive", "cases"]
+try:
+    buttercupql.run(db, "from archive\nsort -rsik\n", schema=schema)
+except buttercupql.CompileError as error:
+    assert error.diagnostics[0].label == "did you mean `risk`?"
+```
+
+It reads SQLite's, DuckDB's and PostgreSQL's tables and views, and ClickHouse's. In a notebook, the `%%bcql` magic
+reads them for each cell: see [Notebooks](notebooks.md).
+
+## Statements
+
+A text compiles to one statement for a query, and to one for each change in a text that changes the database.
+`statements` gives each, to run one by one in order, with its SQL, its values and its `kind`: `"query"`,
+`"change"`, `"definition"` for a change to the database itself, and `"begin"` and `"commit"` around a
+`with transaction:` block. `sql` and `params` are all the statements together.
+
+```py
+script = buttercupql.compile("""
+    create table seen:
+        key: str
+
+    from cases
+    where risk < 50
+    update band = "low"
+""", dialect="sqlite")
+assert [statement.kind for statement in script.statements] == ["definition", "change"]
+update = script.statements[1]
+assert (update.sql, update.params) == ("UPDATE cases SET band = ?\nWHERE risk < 50", ["low"])
+```
+
 ## Mistakes
 
 A text that does not compile raises `buttercupql.CompileError`, a `ValueError`. It holds every problem found, and its

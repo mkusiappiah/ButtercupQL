@@ -53,7 +53,8 @@ jobs:
       - name: Build and install the package
         shell: bash
         run: |
-          python -m pip install maturin pytest
+          # IPython, for the notebook magic's tests.
+          python -m pip install maturin pytest ipython
           maturin build --release --out dist
           python -m pip install --no-index --find-links dist buttercupql
       - name: Tests
@@ -159,3 +160,10 @@ jobs:
         run: cargo clippy -p db-tests --all-targets -- -D warnings
       - name: Tests
         run: cargo test -p db-tests -- --nocapture
+      - name: The Python package, run on the databases through their drivers
+        shell: bash
+        run: |
+          python -m pip install maturin pytest "psycopg[binary]" clickhouse-connect ipython pandas
+          maturin build --release --out dist
+          python -m pip install --no-index --find-links dist buttercupql
+          python -m pytest -q -rs crates/python/tests
