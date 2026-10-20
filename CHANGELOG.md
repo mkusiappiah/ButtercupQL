@@ -29,6 +29,13 @@
 
 ### Fixed
 
+- `not` of a value that can be missing, such as `where not notes`, kept no row where the value was missing; as
+  `not None` is `True` in Python, it now keeps them. The same holds for `and` and `or` read by a `not`, and for a
+  truth used as a value: `select either = notes or assignee`.
+- `**` with a whole power above 4 used `power()`, which SQLite's builds may leave out: on SQLite, whole powers up to
+  16 are multiplied out.
+- `round()` took a half away from 0, as SQL's does: it now takes it to the even neighbour, as Python's does, so
+  `round(2.5)` is `2`, on every database.
 - A sort before a `select` that gives a column the name of one it reads, as in `sort risk` and then
   `select key, risk = -risk`, sorted the rows by the new column on every database. In `ORDER BY`, the old column is
   now named with its table: `ORDER BY cases.risk`. ClickHouse reads such a name as the new column wherever it is

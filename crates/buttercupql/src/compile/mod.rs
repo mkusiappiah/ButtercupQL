@@ -219,6 +219,9 @@ struct Cx<'f> {
     totals: bool,
     /// The expression is a total's argument, where another total can't be.
     in_total: bool,
+    /// The expression is a condition that keeps the rows where it holds: a missing value and a false one keep the
+    /// same rows there, so their truth is written plainly.
+    condition: bool,
 }
 
 impl<'f> Cx<'f> {
@@ -228,6 +231,15 @@ impl<'f> Cx<'f> {
             bindings,
             totals: false,
             in_total: false,
+            condition: false,
+        }
+    }
+
+    /// The same place, for a condition.
+    fn condition(self) -> Cx<'f> {
+        Cx {
+            condition: true,
+            ..self
         }
     }
 }
@@ -1164,7 +1176,7 @@ impl<'a> Compiler<'a> {
             // query of its own.
             rel = self.wrap(rel);
         }
-        let Some(value) = self.expr(condition, Cx::of(&rel.frame, bindings)) else {
+        let Some(value) = self.expr(condition, Cx::of(&rel.frame, bindings).condition()) else {
             self.poisoned = true;
             return rel;
         };
@@ -1746,7 +1758,7 @@ impl<'a> Compiler<'a> {
             col.value.nullable |= left;
             col
         }));
-        let Some(condition) = self.expr(on, Cx::of(&rel.frame, bindings)) else {
+        let Some(condition) = self.expr(on, Cx::of(&rel.frame, bindings).condition()) else {
             self.poisoned = true;
             return rel;
         };

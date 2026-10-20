@@ -334,6 +334,14 @@ impl<'a> Compiler<'a> {
     // ---- Expressions
 
     pub(super) fn expr(&mut self, expr: &'a ast::Expr, cx: Cx<'_>) -> Option<Typed> {
+        // A condition is one through its `and`s and `or`s; anything else in it is a value.
+        let cx = match &expr.kind {
+            ExprKind::Binary(BinaryOp::And | BinaryOp::Or, ..) => cx,
+            _ => Cx {
+                condition: false,
+                ..cx
+            },
+        };
         match &expr.kind {
             ExprKind::Name(name) => self.name(name, expr.span, cx),
             ExprKind::Attribute(base, field) => self.attribute(base, field, expr.span, cx),
@@ -357,7 +365,7 @@ impl<'a> Compiler<'a> {
                 then,
                 otherwise,
             } => {
-                let test = self.expr(test, cx)?;
+                let test = self.expr(test, cx.condition())?;
                 let then = self.expr(then, cx)?;
                 let otherwise = self.expr(otherwise, cx)?;
                 let ty = if then.ty == Type::Unknown {
@@ -402,12 +410,30 @@ impl<'a> Compiler<'a> {
 
     /// A condition, as `where` reads it: Python's truth, in which `0`, `""` and `None` are false.
     pub(super) fn truth(&self, value: Typed) -> Sql {
-        match value.ty {
+        self.truth_of(value, false)
+    }
+
+    /// A condition whose value is read again, by `not` or by `and` and `or`. A value that can be missing is false
+    /// when it is, rather than neither true nor false as SQL has it: `not notes` holds where `notes` is missing, as
+    /// `not None` does in Python. A comparison keeps SQL's meaning for a missing side.
+    fn definite_truth(&self, value: Typed) -> Sql {
+        self.truth_of(value, true)
+    }
+
+    fn truth_of(&self, value: Typed, definite: bool) -> Sql {
+        let test = match value.ty {
             Type::Int | Type::Float | Type::Decimal => {
                 Sql::binary(Binary::NotEq, value.sql, Sql::number("0"))
             }
             Type::Text => Sql::binary(Binary::NotEq, value.sql, Sql::text("")),
-            _ => value.sql,
+            // A column of truth values, rather than a comparison.
+            Type::Bool if matches!(value.sql, Sql::Column { .. }) => value.sql,
+            _ => return value.sql,
+        };
+        if definite && value.nullable {
+            self.is_bool(test, true, false)
+        } else {
+            test
         }
     }
 
@@ -455,11 +481,12 @@ impl<'a> Compiler<'a> {
         span: Span,
         cx: Cx<'_>,
     ) -> Option<Typed> {
+        // What `not` reads, it reads again, as a value: a missing value in it is false.
         let value = self.expr(operand, cx)?;
         match op {
             UnaryOp::Pos => Some(value),
             UnaryOp::Not => {
-                let condition = self.truth(value.clone());
+                let condition = self.definite_truth(value.clone());
                 Some(Typed::from(Sql::not(condition), Type::Bool, &[&value]))
             }
             UnaryOp::Neg if value.ty == Type::Duration => {
@@ -519,7 +546,13 @@ impl<'a> Compiler<'a> {
                 } else {
                     Binary::Or
                 };
-                let sql = Sql::binary(sql_op, self.truth(a.clone()), self.truth(b.clone()));
+                // In a condition, `and` and `or` keep the rows their sides keep, a missing value as a false one.
+                let definite = !cx.condition;
+                let sql = Sql::binary(
+                    sql_op,
+                    self.truth_of(a.clone(), definite),
+                    self.truth_of(b.clone(), definite),
+                );
                 Some(Typed::from(sql, Type::Bool, &[&a, &b]))
             }
             BinaryOp::Add | BinaryOp::Sub => self.add(op == BinaryOp::Sub, a, b, span),
@@ -602,8 +635,19 @@ impl<'a> Compiler<'a> {
             }
             BinaryOp::Pow => {
                 self.numbers("**", &a, &b, span)?;
+                // A small whole power written in the query is multiplied out. SQLite's builds may leave out
+                // `power()`, so there every whole power up to 16 is.
+                let most = if self.dialect == Dialect::Sqlite {
+                    16
+                } else {
+                    4
+                };
                 if let Sql::Number(digits) = &b.sql {
-                    if let Ok(power @ 1..=4) = digits.parse::<u32>() {
+                    if let Some(power) = digits
+                        .parse::<u32>()
+                        .ok()
+                        .filter(|power| (1..=most).contains(power))
+                    {
                         let product = (1..power).fold(a.sql.clone(), |product, _| {
                             Sql::binary(Binary::Mul, product, a.sql.clone())
                         });
@@ -894,6 +938,33 @@ impl<'a> Compiler<'a> {
 
     /// A number rounded down. Many builds of SQLite leave out `floor()`, so there it is worked out from a cast,
     /// which rounds towards zero: one less for a negative number with a fraction.
+    /// A number rounded to a whole one as Python's `round()` rounds it: a half goes to the even neighbour, where
+    /// SQL's `round()` takes it away from 0.
+    pub(super) fn round_half_even(&self, value: Sql) -> Sql {
+        let below = self.floor(value.clone());
+        let nearest = self.floor(Sql::binary(Binary::Add, value.clone(), Sql::number("0.5")));
+        let half = Sql::binary(
+            Binary::Eq,
+            Sql::binary(Binary::Sub, value, below.clone()),
+            Sql::number("0.5"),
+        );
+        // PostgreSQL's `%` takes no fraction, and `below` is one when the number is: it is made whole first.
+        let whole = match self.dialect {
+            Dialect::Postgres => Sql::Cast(Box::new(below), "BIGINT"),
+            _ => below,
+        };
+        let even = Sql::binary(
+            Binary::Eq,
+            Sql::binary(Binary::Mod, whole, Sql::number("2")),
+            Sql::number("0"),
+        );
+        let back = Sql::Case(
+            vec![(Sql::binary(Binary::And, half, even), Sql::number("1"))],
+            Some(Box::new(Sql::number("0"))),
+        );
+        Sql::binary(Binary::Sub, nearest, back)
+    }
+
     pub(super) fn floor(&self, value: Sql) -> Sql {
         match self.dialect {
             Dialect::Sqlite => {

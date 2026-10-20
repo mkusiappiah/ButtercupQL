@@ -434,7 +434,7 @@ impl<'a> Compiler<'a> {
                     self.report(problem);
                     return None;
                 }
-                let typed = self.expr(condition, Cx::of(&rel.frame, &empty))?;
+                let typed = self.expr(condition, Cx::of(&rel.frame, &empty).condition())?;
                 let truth = self.truth(typed);
                 Some(written::write_expr_inline(&truth, self.dialect))
             }

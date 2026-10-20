@@ -474,6 +474,9 @@ fn arithmetic_is_pythons() {
     // `%` takes the sign of the divisor.
     assert_eq!(condition("a % 3 == 1").0, "(a % 3 + 3) % 3 = 1");
     assert_eq!(condition("a ** 2 > b ** c").0, "a * a > power(b, c)");
+    // SQLite's builds may have no `power()`, so a whole power up to 16 is multiplied out there.
+    assert_eq!(condition("a ** 6 > 1").0, "power(a, 6) > 1");
+    assert_eq!(condition("a ** 6 > 1").1, "a * a * a * a * a * a > 1");
     assert_eq!(condition("-a > 1").0, "-a > 1");
     assert_eq!(condition("a - -1 > 0").0, "a - -1 > 0");
 }
@@ -587,9 +590,14 @@ fn conditional_values_and_casts() {
     assert_eq!(condition("int(x) == 1").0, "CAST(x AS BIGINT) = 1");
     assert_eq!(condition("int(x) == 1").1, "CAST(x AS INTEGER) = 1");
     assert_eq!(condition("str(x) == \"1\"").0, "CAST(x AS TEXT) = $1");
+    // Python's `round()` takes a half to the even neighbour, where SQL's takes it away from 0.
+    assert_eq!(
+        condition("round(x) > 1").0,
+        "floor(x + 0.5) - CASE WHEN x - floor(x) = 0.5 AND CAST(floor(x) AS BIGINT) % 2 = 0 THEN 1 ELSE 0 END > 1"
+    );
     assert_eq!(
         condition("round(x, 2) > 1").0,
-        "round(CAST(x AS NUMERIC), 2) > 1"
+        "(floor(x * 100.0 + 0.5) - CASE WHEN x * 100.0 - floor(x * 100.0) = 0.5 AND CAST(floor(x * 100.0) AS BIGINT) % 2 = 0 THEN 1 ELSE 0 END) / 100.0 > 1"
     );
     assert_eq!(condition("max(a, b) > 1").0, "greatest(a, b) > 1");
     assert_eq!(condition("max(a, b) > 1").1, "max(a, b) > 1");
@@ -633,9 +641,10 @@ fn where_takes_pythons_truth() {
         compiled("from t\nwhere name and flag\n"),
         "SELECT *\nFROM t\nWHERE name <> $1 AND flag"
     );
+    // `not` reads the truth again: a missing `n` is false, so `not n` holds for it, as `not None` does.
     assert_eq!(
         compiled("from t\nwhere not n\n"),
-        "SELECT *\nFROM t\nWHERE NOT (n <> 0)"
+        "SELECT *\nFROM t\nWHERE NOT ((n <> 0) IS TRUE)"
     );
 }
 
@@ -726,6 +735,29 @@ fn a_column_given_the_name_of_one_it_reads_does_not_take_its_place() {
         )
         .unwrap(),
         "SELECT key, risk * 2 AS doubled\nFROM cases\nWHERE risk > 50"
+    );
+}
+
+#[test]
+fn a_missing_value_is_false_where_its_truth_is_read_again() {
+    // `not notes` holds where `notes` is missing, as `not None` does in Python.
+    assert_eq!(
+        with_schema("from cases\nwhere not notes\n", Dialect::Postgres).unwrap(),
+        "SELECT *\nFROM cases\nWHERE NOT ((notes <> $1) IS TRUE)"
+    );
+    assert_eq!(
+        with_schema("from cases\nwhere not notes\n", Dialect::ClickHouse).unwrap(),
+        "SELECT *\nFROM cases\nWHERE NOT ifNull(notes <> {p1:String}, false)"
+    );
+    // Alone in a `where`, a missing value keeps no row either way, so the test is written plainly.
+    assert_eq!(
+        with_schema("from cases\nwhere notes\n", Dialect::Postgres).unwrap(),
+        "SELECT *\nFROM cases\nWHERE notes <> $1"
+    );
+    // A comparison keeps SQL's meaning for a missing side: `not (risk > 50)` keeps no row with no risk.
+    assert_eq!(
+        with_schema("from cases\nwhere not (risk > 50)\n", Dialect::Postgres).unwrap(),
+        "SELECT *\nFROM cases\nWHERE NOT (risk > 50)"
     );
 }
 

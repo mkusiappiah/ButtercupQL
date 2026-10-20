@@ -147,6 +147,7 @@ impl<'a> Compiler<'a> {
                 // A total's condition is about each row: it can't hold a total.
                 Cx {
                     totals: false,
+                    condition: arg_name.text == "where",
                     ..cx
                 }
             } else {
@@ -280,18 +281,53 @@ impl<'a> Compiler<'a> {
             "round" => {
                 self.arity(name, given, 1, 2, span)?;
                 let value = &values[0];
-                let mut target = value.sql.clone();
-                if dialect == Dialect::Postgres && value.ty != Type::Decimal {
-                    // PostgreSQL rounds to places only a `numeric`.
-                    target = Sql::Cast(Box::new(target), "NUMERIC");
-                }
-                let mut call = vec![target];
-                if let Some(places) = values.get(1) {
-                    call.push(places.sql.clone());
-                }
-                let ty = if given == 1 { Type::Int } else { Type::Decimal };
                 let inputs: Vec<&Typed> = values.iter().collect();
-                Some(Typed::from(Sql::call("round", call), ty, &inputs))
+                let places = values.get(1).map(|places| match &places.sql {
+                    Sql::Number(digits) => digits.parse::<i64>().ok().filter(|n| n.abs() <= 18),
+                    _ => None,
+                });
+                // A whole number rounded to places at or after the point is itself.
+                if value.ty == Type::Int && matches!(places, None | Some(Some(0..))) {
+                    return Some(value.clone());
+                }
+                let Some(places) = places else {
+                    let sql = self.round_half_even(value.sql.clone());
+                    return Some(Typed::from(sql, Type::Int, &inputs));
+                };
+                // To places: the number is scaled so that they are whole, rounded, and scaled back. A scale of a
+                // fraction is a division, which keeps an exact half exact.
+                let exact = if value.ty == Type::Int {
+                    Sql::binary(Binary::Mul, value.sql.clone(), Sql::number("1.0"))
+                } else {
+                    value.sql.clone()
+                };
+                let sql = match places {
+                    Some(n) => {
+                        // Written with a point, so that SQLite divides it as a fraction.
+                        let scale =
+                            Sql::number(&format!("{}.0", 10i64.pow(n.unsigned_abs() as u32)));
+                        let (into, back) = if n >= 0 {
+                            (Binary::Mul, Binary::Div)
+                        } else {
+                            (Binary::Div, Binary::Mul)
+                        };
+                        let rounded = self.round_half_even(Sql::binary(into, exact, scale.clone()));
+                        Sql::binary(back, rounded, scale)
+                    }
+                    None => {
+                        let scale =
+                            Sql::call("power", vec![Sql::number("10.0"), values[1].sql.clone()]);
+                        let rounded =
+                            self.round_half_even(Sql::binary(Binary::Mul, exact, scale.clone()));
+                        Sql::binary(Binary::Div, rounded, scale)
+                    }
+                };
+                let ty = if value.ty == Type::Decimal {
+                    Type::Decimal
+                } else {
+                    Type::Float
+                };
+                Some(Typed::from(sql, ty, &inputs))
             }
             "min" | "max" => {
                 if given < 2 {
@@ -761,7 +797,7 @@ impl<'a> Compiler<'a> {
             let filter = match filter {
                 None => None,
                 Some(condition) => {
-                    let condition = self.expr(condition, row_cx)?;
+                    let condition = self.expr(condition, row_cx.condition())?;
                     Some(self.truth(condition))
                 }
             };

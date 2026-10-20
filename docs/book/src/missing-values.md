@@ -93,3 +93,21 @@ FROM cases
 WHERE notes <> $1
 -- parameters: [""]
 ```
+
+A missing value is false, so `not notes` holds where `notes` is missing, as `not None` does in Python. SQL would
+take the missing value as neither true nor false, and keep no row, so ButtercupQL says so:
+
+```python
+from cases
+where not notes
+```
+
+```sql schema
+SELECT *
+FROM cases
+WHERE NOT ((notes <> $1) IS TRUE)
+-- parameters: [""]
+```
+
+A comparison is not a value's truth: with a missing side, it is neither true nor false, as in SQL, and so is its
+`not`. `where not (risk > 90)` keeps no row with no risk.
