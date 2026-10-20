@@ -55,7 +55,11 @@ pub struct UnknownDialect(pub String);
 
 impl fmt::Display for UnknownDialect {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "unknown dialect `{}`: use sqlite, postgres, duckdb or clickhouse", self.0)
+        write!(
+            f,
+            "unknown dialect `{}`: use sqlite, postgres, duckdb or clickhouse",
+            self.0
+        )
     }
 }
 
