@@ -1,4 +1,7 @@
-use crate::{Column, Dialect, Options, ParamStyle, Schema, Type, Value, compile};
+use crate::{
+    Column, Dialect, Loader, ModuleName, Options, ParamStyle, Schema, SourceText, Type, Value,
+    compile,
+};
 
 fn sql_for(text: &str, dialect: Dialect) -> String {
     match compile(text, &Options::new(dialect)) {
@@ -31,7 +34,8 @@ fn condition(text: &str) -> (String, String) {
 fn params(text: &str, dialect: Dialect) -> Vec<Value> {
     compile(text, &Options::new(dialect))
         .expect("the text compiles")
-        .params
+        .values()
+        .expect("the query has no arguments")
 }
 
 fn text(value: &str) -> Value {
@@ -727,10 +731,8 @@ fn placeholders_are_written_as_the_driver_takes_them() {
 }
 
 #[test]
-fn compiling_needs_a_query_and_a_supported_database() {
+fn compiling_needs_a_query() {
     assert_eq!(problems("x = 1\n"), ["this file has no query to compile"]);
-    let duck = compile("from t", &Options::new(Dialect::DuckDb)).unwrap_err();
-    assert_eq!(duck[0].message, "compiling for duckdb is not supported yet");
     assert_eq!(
         problems("from t\nwhere x ==\n"),
         ["expected a value after `==`"]
@@ -753,4 +755,465 @@ fn unknown_functions_get_a_suggestion() {
     )
     .unwrap_err();
     assert_eq!(method[0].label, "did you mean `.lower()`?");
+}
+
+// ---- DuckDB and ClickHouse
+
+fn duck(text: &str) -> String {
+    sql_for(text, Dialect::DuckDb)
+}
+
+fn click(text: &str) -> String {
+    sql_for(text, Dialect::ClickHouse)
+}
+
+#[test]
+fn duckdb_divides_exactly_and_sorts_missing_values_last_itself() {
+    assert_eq!(
+        duck("from t\nwhere a / b > 1 and status == \"open\"\nsort -risk\n"),
+        "SELECT *\nFROM t\nWHERE a / b > 1 AND status = $1\nORDER BY risk DESC"
+    );
+    assert_eq!(
+        duck("from t\nx = 7 // 2\n"),
+        "SELECT *, CAST(floor(7 / 2) AS BIGINT) AS x\nFROM t"
+    );
+    assert_eq!(
+        duck("from t\nwhere raised > now() - days(7) and due < today() + weeks(2)\n"),
+        "SELECT *\nFROM t\nWHERE raised > now() - INTERVAL '7 days' AND due < CURRENT_DATE + 14"
+    );
+}
+
+#[test]
+fn clickhouse_has_its_own_forms() {
+    assert_eq!(
+        click("from t\nwhere status == \"open\" and \"Acme\" in operator\n"),
+        "SELECT *\nFROM t\nWHERE status = {p1:String} AND position(operator, {p2:String}) > 0"
+    );
+    assert_eq!(
+        click("from t\nwhere name.startswith(\"50%\") and not name.endswith(\"_x\")\n"),
+        "SELECT *\nFROM t\nWHERE startsWith(name, {p1:String}) AND NOT endsWith(name, {p2:String})"
+    );
+    assert_eq!(
+        click(
+            "from t\nwhere raised > now() - days(7) and due < today() + weeks(2) and raised < date(\"2026-10-20\")\n"
+        ),
+        "SELECT *\nFROM t\nWHERE raised > now() - INTERVAL 7 DAY AND due < today() + INTERVAL 14 DAY AND raised < toDate('2026-10-20')"
+    );
+    assert_eq!(
+        click("from t\nwhere raised.year == 2026 and len(name.lower()) > 3\n"),
+        "SELECT *\nFROM t\nWHERE toYear(raised) = 2026 AND lengthUTF8(lowerUTF8(name)) > 3"
+    );
+    assert_eq!(
+        click("from t\nlabel = f\"{key}:{risk}\"\nwhole = 7 // 2\n"),
+        "SELECT *, toString(key) || {p1:String} || toString(risk) AS label, toInt64(floor(7 / 2)) AS whole\nFROM t"
+    );
+    assert_eq!(
+        click("from t\nwhere flag is True and other is not False\n"),
+        "SELECT *\nFROM t\nWHERE ifNull(flag, false) AND ifNull(other, true)"
+    );
+}
+
+#[test]
+fn clickhouse_totals_take_their_conditions_in_if_functions() {
+    let query = "\
+from transactions
+group by operator:
+    big = count(where=amount > 1_000_000)
+    money = sum(amount, where=kind == \"in\")
+    filled = count(note, where=amount > 0)
+    kinds = count_distinct(kind, where=amount > 0)
+";
+    assert_eq!(
+        click(query),
+        "SELECT operator, countIf(amount > 1000000) AS big, coalesce(sumIf(amount, kind = {p1:String}), 0) AS money, countIf(note IS NOT NULL AND amount > 0) AS filled, uniqExactIf(kind, amount > 0) AS kinds\nFROM transactions\nGROUP BY operator"
+    );
+}
+
+#[test]
+fn clickhouse_totals_of_no_rows_are_missing_as_in_sql() {
+    assert_eq!(
+        click(
+            "from t\nsummarize:\n    high = max(x)\n    average = mean(x)\n    every = all(flag)\n    low = min(x, where=x > 1)\n"
+        ),
+        "SELECT maxOrNull(x) AS high, avgOrNull(x) AS average, coalesce(minOrNull(flag), TRUE) AS every, minIfOrNull(x, x > 1) AS low\nFROM t"
+    );
+}
+
+#[test]
+fn clickhouse_is_told_that_rows_with_no_match_are_missing() {
+    assert_eq!(
+        click(
+            "from cases\nleft join accounts on account_id == accounts.id\nwhere accounts.id is None\n"
+        ),
+        "SELECT *\nFROM cases\nLEFT JOIN accounts ON account_id = accounts.id\nWHERE accounts.id IS NULL\nSETTINGS join_use_nulls = 1"
+    );
+}
+
+// ---- Window functions
+
+#[test]
+fn window_functions_take_over_and_sort() {
+    assert_eq!(
+        pg("from t\nplace = row_number(over=operator, sort=-risk)\n"),
+        "SELECT *, row_number() OVER (PARTITION BY operator ORDER BY risk DESC NULLS LAST) AS place\nFROM t"
+    );
+    assert_eq!(
+        pg("from t\nso_far = sum(amount, sort=time)\n"),
+        "SELECT *, coalesce(sum(amount) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW), 0) AS so_far\nFROM t"
+    );
+    assert_eq!(
+        pg("from t\nweek = mean(amount, over=[operator, kind], sort=day, rows=7)\n"),
+        "SELECT *, avg(amount) OVER (PARTITION BY operator, kind ORDER BY day ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS week\nFROM t"
+    );
+    assert_eq!(
+        pg("from t\nshare = amount / sum(amount, over=operator)\nall_rows = count(over=())\n"),
+        "SELECT *, amount * 1.0 / coalesce(sum(amount) OVER (PARTITION BY operator), 0) AS share, count(*) OVER () AS all_rows\nFROM t"
+    );
+    assert_eq!(
+        pg("from t\nbefore = lag(risk, sort=raised)\nafter = lead(risk, 2, sort=raised, default=0)\nfirst_seen = first(raised, over=account, sort=raised)\n"),
+        "SELECT *, lag(risk, 1) OVER (ORDER BY raised NULLS LAST) AS before, lead(risk, 2, 0) OVER (ORDER BY raised NULLS LAST) AS after, first_value(raised) OVER (PARTITION BY account ORDER BY raised NULLS LAST ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS first_seen\nFROM t".replace("raised NULLS LAST", "raised")
+    );
+    assert_eq!(
+        click("from t\nbefore = lag(risk, sort=raised)\n"),
+        "SELECT *, lagInFrame(toNullable(risk), 1) OVER (ORDER BY raised ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS before\nFROM t"
+    );
+}
+
+#[test]
+fn a_condition_on_a_window_value_comes_after_it() {
+    let query = "from t\nplace = rank(over=operator, sort=-risk)\nwhere place <= 3\n";
+    assert_eq!(
+        pg(query),
+        "\
+SELECT *
+FROM (
+  SELECT *, rank() OVER (PARTITION BY operator ORDER BY risk DESC NULLS LAST) AS place
+  FROM t
+) AS _q1
+WHERE place <= 3"
+    );
+    assert_eq!(
+        duck(query),
+        "SELECT *, rank() OVER (PARTITION BY operator ORDER BY risk DESC) AS place\nFROM t\nQUALIFY rank() OVER (PARTITION BY operator ORDER BY risk DESC) <= 3"
+    );
+    // Any condition after a window value: the ranks are of all the rows.
+    assert!(
+        pg("from t\nplace = rank(sort=-risk)\nwhere band == \"high\"\n")
+            .contains(") AS _q1\nWHERE band = $1")
+    );
+    assert_eq!(
+        problems("from t\nwhere rank(sort=-risk) <= 3\n"),
+        ["a window value in a condition needs a name of its own"]
+    );
+}
+
+#[test]
+fn a_window_counts_the_rows_the_steps_before_kept() {
+    assert_eq!(
+        pg("from t\nsort -risk\ntake 5\nplace = row_number(sort=-risk)\n"),
+        "\
+SELECT *, row_number() OVER (ORDER BY risk DESC NULLS LAST) AS place
+FROM (
+  SELECT *
+  FROM t
+  ORDER BY risk DESC NULLS LAST
+  LIMIT 5
+) AS _q1
+ORDER BY risk DESC NULLS LAST"
+    );
+    assert_eq!(
+        pg("from t\ngroup by operator:\n    money = sum(amount)\nplace = rank(sort=-money)\n"),
+        "SELECT operator, coalesce(sum(amount), 0) AS money, rank() OVER (ORDER BY coalesce(sum(amount), 0) DESC) AS place\nFROM t\nGROUP BY operator"
+    );
+}
+
+#[test]
+fn window_values_are_checked() {
+    assert_eq!(
+        problems("from t\nbefore = lag(risk)\n"),
+        ["`lag()` needs `sort=` to know which row comes before"]
+    );
+    assert_eq!(
+        problems("from t\ngroup by a:\n    place = rank(sort=-b)\n"),
+        ["a window value can't be one of a block's totals"]
+    );
+    assert_eq!(
+        problems("from t\nn = sum(x, rows=3)\n"),
+        ["`rows=` needs `sort=`, to know which rows come before"]
+    );
+    assert_eq!(
+        problems("from t\nn = sum(x, sort=t, rows=0)\n"),
+        ["`rows=` takes how many rows the window holds, 1 or more"]
+    );
+    assert_eq!(
+        problems("from t\nn = count_distinct(x, over=a)\n"),
+        ["`count_distinct()` can't be worked out over a window"]
+    );
+}
+
+// ---- Links
+
+fn linked() -> Schema {
+    Schema::from_sql(
+        "\
+CREATE TABLE banks (id bigint PRIMARY KEY, name text NOT NULL);
+CREATE TABLE accounts (id bigint PRIMARY KEY, operator text NOT NULL, bank_id bigint REFERENCES banks);
+CREATE TABLE cases (id bigint PRIMARY KEY, key text NOT NULL, account_id bigint REFERENCES accounts (id), risk integer);",
+    )
+    .expect("the schema reads")
+}
+
+fn with_links(text: &str) -> Result<String, Vec<String>> {
+    let schema = linked();
+    compile(text, &Options::new(Dialect::Postgres).with_schema(&schema))
+        .map(|compiled| compiled.sql)
+        .map_err(|problems| {
+            problems
+                .into_iter()
+                .map(|problem| problem.message)
+                .collect()
+        })
+}
+
+#[test]
+fn a_link_is_followed_with_a_dot() {
+    assert_eq!(
+        with_links("from cases\nwhere account.operator == \"Acme\"\n").unwrap(),
+        "SELECT cases.*\nFROM cases\nLEFT JOIN accounts AS account ON cases.account_id = account.id\nWHERE account.operator = $1"
+    );
+    assert_eq!(
+        with_links("from cases\nselect key, bank = account.bank.name\n").unwrap(),
+        "\
+SELECT cases.key, account_bank.name AS bank
+FROM cases
+LEFT JOIN accounts AS account ON cases.account_id = account.id
+LEFT JOIN banks AS account_bank ON account.bank_id = account_bank.id"
+    );
+    assert_eq!(
+        with_links("from cases\ngroup by operator = account.operator:\n    n = count()\n").unwrap(),
+        "SELECT account.operator, count(*) AS n\nFROM cases\nLEFT JOIN accounts AS account ON cases.account_id = account.id\nGROUP BY account.operator"
+    );
+}
+
+#[test]
+fn a_link_after_grouping_reads_the_groups() {
+    assert_eq!(
+        with_links("from cases\ngroup by account_id:\n    n = count()\nwhere account.operator == \"Acme\"\n").unwrap(),
+        "\
+SELECT _q1.*
+FROM (
+  SELECT account_id, count(*) AS n
+  FROM cases
+  GROUP BY account_id
+) AS _q1
+LEFT JOIN accounts AS account ON _q1.account_id = account.id
+WHERE account.operator = $1"
+    );
+}
+
+#[test]
+fn links_are_checked() {
+    assert_eq!(
+        with_links("from cases\nwhere account.opertor == \"A\"\n").unwrap_err(),
+        ["there is no column `opertor` in `account`"]
+    );
+    assert_eq!(
+        problems("from cases\nwhere account.operator == \"A\"\n"),
+        ["there is no table `account` here"]
+    );
+}
+
+// ---- Queries with arguments
+
+#[test]
+fn a_query_def_compiles_with_its_arguments_open() {
+    let text = "\
+def for_account(account: str, days_back: int = 30, rows: int = 10):
+    from cases
+    where account_id == account or payee == account
+    where raised > now() - days(days_back)
+    take rows
+";
+    let compiled = compile(
+        text,
+        &Options::new(Dialect::Postgres).with_query("for_account"),
+    )
+    .unwrap();
+    assert_eq!(
+        compiled.sql,
+        "SELECT *\nFROM cases\nWHERE (account_id = $1 OR payee = $1) AND raised > now() - $2 * INTERVAL '1 day'\nLIMIT $3"
+    );
+    assert_eq!(compiled.names, ["account", "days_back", "rows"]);
+    assert_eq!(
+        compiled.bind(&[("account", text_value("A1"))]).unwrap(),
+        [text_value("A1"), Value::Int(30), Value::Int(10)]
+    );
+    assert_eq!(
+        compiled.bind(&[]).unwrap_err().to_string(),
+        "the query needs a value for `account`"
+    );
+    assert_eq!(
+        compiled
+            .bind(&[("acount", text_value("A1"))])
+            .unwrap_err()
+            .to_string(),
+        "the query has no argument `acount`: it takes account, days_back, rows"
+    );
+    let clickhouse = compile(
+        text,
+        &Options::new(Dialect::ClickHouse).with_query("for_account"),
+    )
+    .unwrap();
+    assert_eq!(
+        clickhouse.sql,
+        "SELECT *\nFROM cases\nWHERE (account_id = {account:String} OR payee = {account:String}) AND raised > now() - toIntervalDay({days_back:Int64})\nLIMIT {rows:Int64}"
+    );
+    let named = clickhouse
+        .bind_named(&[("account", text_value("A1"))])
+        .unwrap();
+    assert_eq!(
+        named
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["account", "days_back", "rows"]
+    );
+}
+
+fn text_value(value: &str) -> Value {
+    Value::Text(value.to_string())
+}
+
+#[test]
+fn a_named_query_can_be_compiled_alone() {
+    let text = "open_cases = (from cases; where status == \"open\")\nfrom open_cases\ntake 5\n";
+    let compiled = compile(
+        text,
+        &Options::new(Dialect::Sqlite).with_query("open_cases"),
+    )
+    .unwrap();
+    assert_eq!(compiled.sql, "SELECT *\nFROM cases\nWHERE status = ?");
+    let missing =
+        compile(text, &Options::new(Dialect::Sqlite).with_query("open_case")).unwrap_err();
+    assert_eq!(missing[0].message, "there is no query named `open_case`");
+    assert_eq!(missing[0].label, "did you mean `open_cases`?");
+}
+
+// ---- Imports
+
+struct Modules(Vec<(&'static str, &'static str)>);
+
+impl Loader for Modules {
+    fn load(&self, module: &ModuleName<'_>, _importer: &str) -> Result<SourceText, String> {
+        let name = module.parts.join(".");
+        self.0
+            .iter()
+            .find(|(known, _)| *known == name)
+            .map(|(known, text)| SourceText {
+                name: format!("{known}.bcql"),
+                text: text.to_string(),
+            })
+            .ok_or_else(|| format!("there is no module `{name}`"))
+    }
+}
+
+const SHARED: &str = "\
+threshold = 1_000_000
+
+def recent(days_back=7):
+    where raised > now() - days(days_back)
+
+open_cases = (
+    from cases
+    where status == \"open\"
+)
+";
+
+fn with_modules(text: &str, modules: &Modules) -> Result<String, Vec<String>> {
+    compile(text, &Options::new(Dialect::Postgres).with_loader(modules))
+        .map(|compiled| compiled.sql)
+        .map_err(|problems| {
+            problems
+                .into_iter()
+                .map(|problem| problem.message)
+                .collect()
+        })
+}
+
+#[test]
+fn imports_bring_a_modules_definitions() {
+    let modules = Modules(vec![("shared", SHARED)]);
+    assert_eq!(
+        with_modules("from shared import recent, threshold\nfrom cases\nrecent(30)\nwhere amount > threshold\n", &modules).unwrap(),
+        "SELECT *\nFROM cases\nWHERE raised > now() - INTERVAL '30 days' AND amount > 1000000"
+    );
+    assert_eq!(
+        with_modules(
+            "import shared\nfrom shared.open_cases\nshared.recent()\n",
+            &modules
+        )
+        .unwrap(),
+        "SELECT *\nFROM cases\nWHERE status = $1 AND raised > now() - INTERVAL '7 days'"
+    );
+    assert_eq!(
+        with_modules(
+            "import shared as s\nfrom cases\nwhere amount > s.threshold\n",
+            &modules
+        )
+        .unwrap(),
+        "SELECT *\nFROM cases\nWHERE amount > 1000000"
+    );
+}
+
+#[test]
+fn import_problems_are_reported_where_they_are() {
+    let modules = Modules(vec![
+        ("shared", SHARED),
+        ("broken", "def f():\n    where x =\n"),
+        ("a", "from b import x\nx = 1\n"),
+        ("b", "from a import x\n"),
+    ]);
+    assert_eq!(
+        with_modules("from shared import recnt\nfrom cases\n", &modules).unwrap_err(),
+        ["`shared.bcql` has no `recnt`"]
+    );
+    assert_eq!(
+        with_modules("import nope\nfrom cases\n", &modules).unwrap_err(),
+        ["can't import `nope`"]
+    );
+    let broken = compile(
+        "import broken\nfrom cases\n",
+        &Options::new(Dialect::Postgres).with_loader(&modules),
+    )
+    .unwrap_err();
+    assert_eq!(
+        broken[0].file.as_ref().map(|file| file.name.as_str()),
+        Some("broken.bcql")
+    );
+    assert!(
+        with_modules("import a\nfrom cases\n", &modules)
+            .unwrap_err()
+            .contains(&"`a` imports itself".to_string())
+    );
+    assert_eq!(
+        problems("import shared\nfrom cases\n"),
+        ["`shared` can't be imported here"]
+    );
+}
+
+#[test]
+fn a_def_reads_its_own_modules_names() {
+    // `recent` uses the module's `cutoff`, not the importing file's.
+    let modules = Modules(vec![(
+        "dates",
+        "cutoff = 3\ndef recent():\n    where age < cutoff\n",
+    )]);
+    assert_eq!(
+        with_modules(
+            "from dates import recent\ncutoff = 99\nfrom cases\nrecent()\nwhere size < cutoff\n",
+            &modules
+        )
+        .unwrap(),
+        "SELECT *\nFROM cases\nWHERE age < 3 AND size < 99"
+    );
 }

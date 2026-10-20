@@ -1,7 +1,7 @@
 # ButtercupQL language design — v0.1
 
-**Status:** approved on 20 October 2026. The parser reads every form in this document, and the compiler is being built
-from it. The research behind each choice is in [research.md](research.md).
+**Status:** approved on 20 October 2026. The compiler reads every form in this document and compiles it for SQLite,
+PostgreSQL, DuckDB and ClickHouse. The research behind each choice is in [research.md](research.md).
 
 ## Goals
 
@@ -107,6 +107,33 @@ summarize:
     operators = count()
 ```
 
+## Window functions
+
+A total given `over=`, `sort=` or `rows=` keeps every row, with the total of the rows around it beside each one. The
+window functions work the same way:
+
+```python
+from transactions
+share = amount / sum(amount, over=operator)        # each row's share of its operator's total
+so_far = sum(amount, sort=time)                    # a running total
+week = mean(amount, sort=day, rows=7)              # the mean of each row and the six before it
+place = rank(over=operator, sort=-amount)          # 1 for each operator's largest
+before = lag(amount, sort=time)                    # the value on the row before
+```
+
+| Argument | Means | SQL |
+|---|---|---|
+| `over=operator`, `over=[a, b]` | Work over the rows of each operator; `over=()` is all the rows | `PARTITION BY` |
+| `sort=-risk`, `sort=[a, -b]` | In this order, `-` for high to low | `ORDER BY` in the window |
+| `rows=7` | Only this row and the 6 before it | `ROWS BETWEEN 6 PRECEDING AND CURRENT ROW` |
+
+- The window functions are `row_number()`, `rank()`, `dense_rank()`, `lag(x, n)` and `lead(x, n)`, which take
+  `default=`, and `first(x)` and `last(x)`. Every one but `row_number()` needs `sort=`.
+- A sorted total runs from the first row to the current one, as pandas' `cumsum` does. SQL's own default also takes in
+  the rows that tie with the current one.
+- A window value counts the rows the steps before kept: after `take 5`, `row_number()` numbers those 5. A `where` after a
+  window value keeps rows by it, on DuckDB in the same query with `QUALIFY`, and elsewhere in a query around it.
+
 ## Joins and links
 
 An explicit join is one line:
@@ -117,13 +144,19 @@ join accounts on account_id == accounts.id
 where accounts.operator == "Acme"
 ```
 
-**Links (v0.2).** When the schema says which column points to which table, a query follows the link with a dot, and the
+**Links.** When the schema says which column points to which table, a query follows the link with a dot, and the
 compiler writes the join:
 
 ```python
 from cases
 where account.operator == "Acme"          # cases.account_id → accounts.id
 ```
+
+- A column that points to another table, `account_id REFERENCES accounts`, is followed by its name without `_id`:
+  `account`. A link from the linked table goes on: `account.bank.name`.
+- Each link is joined once, with `LEFT JOIN`, so a row whose link leads nowhere stays, its linked values missing:
+  `where account.id is None` finds the cases with no account.
+- Links need a schema, with the database's `REFERENCES` or `FOREIGN KEY` constraints in it.
 
 ## Reuse
 
@@ -152,8 +185,9 @@ recent(30)
 take 10
 ```
 
-**Queries with parameters.** A `def` whose body starts with `from` is a query; its arguments become the SQL's
-parameters when it is compiled:
+**Queries with parameters.** A `def` whose body starts with `from` is a query. Called, as in `from cases_for("A1")`,
+it is read in place; compiled on its own, its parameters become the SQL's placeholders, given values when the query
+runs:
 
 ```python
 def cases_for(account: str, days_back: int = 30):
@@ -162,7 +196,17 @@ def cases_for(account: str, days_back: int = 30):
     recent(days_back)
 ```
 
+Compiled on its own with `bcql compile report.bcql --query cases_for`, or `compile(text, query="cases_for")` from
+Python, the query keeps `$1` and `$2` for `account` and `days_back`, and `bind(account="A1")` gives their values, with
+`days_back`'s default. On ClickHouse the placeholders are named and typed: `{account:String}`.
+
 **Modules.** Python's own import lines: `from shared import recent`, or `import shared` and then `shared.recent()`.
+
+- `import shared` reads `shared.bcql` in the folder of the file compiled, and `import a.b` reads `a/b.bcql` there.
+  `from .lib import x` reads `lib.bcql` beside the importing file; each further dot is a folder up.
+- A module's `def`s, named queries and values mean what its own names say, as a Python function sees its own module's
+  names: a module's `cutoff` is not the importing file's `cutoff`.
+- A mistake in a module is shown in the module's own text.
 
 ## Missing values done right
 
@@ -192,14 +236,20 @@ From the command line: `bcql compile query.bcql --dialect sqlite` and `bcql chec
 `.bcql`. Both take `--schema schema.sql`, the database's own `CREATE TABLE` statements, to check every name against the
 tables.
 
-**Each database.** The same query gives the same rows on SQLite and PostgreSQL:
+**Each database.** The same query gives the same rows on SQLite, PostgreSQL, DuckDB and ClickHouse:
 
 - **SQLite** keeps dates and times as text. ButtercupQL compares them in the form SQLite's own date functions write,
   `2026-10-20 14:30:00`, and moves them with those functions: `datetime('now', '-7 days')`.
 - **SQLite** builds often leave out the maths functions, so ButtercupQL does without them: `//` and `%` are worked out
   from casts, and `x ** 2` to `x ** 4` are multiplications. Other powers need SQLite's `power()`.
-- **PostgreSQL** gets `$1` placeholders and **SQLite** `?`, as their own drivers take them; Python's psycopg takes
-  `%s`, which `--params format` writes.
+- **DuckDB's** `/` already divides exactly and it puts missing values last by itself, so its SQL is the plainest; a
+  `where` on a window value is a `QUALIFY`.
+- **ClickHouse** is written in its own forms: `{p1:String}` placeholders, `countIf()` and `sumIf()` for totals with
+  conditions, `startsWith()`, `INTERVAL 7 DAY`, and `maxOrNull()` so that the total of no rows is missing. A query
+  with a `LEFT JOIN` gets `SETTINGS join_use_nulls = 1`, so that a row with no match has missing values rather than
+  empty ones.
+- **PostgreSQL** and **DuckDB** get `$1` placeholders and **SQLite** `?`, as their own drivers take them; Python's
+  psycopg takes `%s`, which `--params format` writes.
 
 ## Errors that help
 
@@ -250,10 +300,10 @@ Settled while building the parser, each as Python does it where Python has an an
 - **Other languages' habits are caught.** `order by`, `limit`, `having`, `WHERE`, `=` in a condition, `&&`, `||`, `!`,
   `<>`, `desc` and `x as y` are each reported with the ButtercupQL way to write them.
 
-## Not in v0.1
+## Not yet
 
 - Writing data (`insert`, `update`, `delete`) and creating tables.
-- Window functions, links, `match`, recursive queries and pivots: planned for v0.2 and later.
+- `match`, recursive queries, pivots, and subtracting one date from another.
 
 ## Decisions
 
@@ -262,4 +312,4 @@ Approved on 20 October 2026:
 1. `sort -risk` as the main form, with `reverse=True` accepted.
 2. `mean(x)` for averages, with `avg(x)` accepted.
 3. The `.bcql` extension and the `bcql` command (`bql` is taken by another project).
-4. Links from the schema in v0.2, after the first release.
+4. Links from the schema in v0.2, after the first release. They came sooner, with the compiler's fourth step.

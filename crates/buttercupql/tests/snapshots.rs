@@ -33,7 +33,7 @@ fn every_example_compiles_to_its_snapshot() {
             continue;
         }
         let text = fs::read_to_string(&path).expect("an example can be read");
-        for dialect in [Dialect::Sqlite, Dialect::Postgres] {
+        for dialect in Dialect::ALL {
             let compiled =
                 buttercupql::compile(&text, &Options::new(dialect)).unwrap_or_else(|problems| {
                     panic!(
@@ -41,7 +41,8 @@ fn every_example_compiles_to_its_snapshot() {
                         path.display()
                     )
                 });
-            let got = snapshot(&compiled.sql, &compiled.params);
+            let values = compiled.values().expect("an example has no arguments");
+            let got = snapshot(&compiled.sql, &values);
             let file = path.with_extension(format!("{dialect}.sql"));
             let kept = fs::read_to_string(&file)
                 .unwrap_or_default()
@@ -57,7 +58,7 @@ fn every_example_compiles_to_its_snapshot() {
             checked += 1;
         }
     }
-    assert!(checked >= 8, "only {checked} snapshots were checked");
+    assert!(checked >= 16, "only {checked} snapshots were checked");
     assert!(
         stale.is_empty(),
         "snapshots differ (run with BCQL_BLESS=1 to update them):\n\n{}",

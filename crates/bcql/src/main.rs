@@ -3,7 +3,12 @@
 use std::io::{self, IsTerminal, Read};
 use std::process::ExitCode;
 
-use buttercupql::{Diagnostic, Dialect, Options, ParamStyle, Schema, Severity, SourceFile, Value};
+use std::path::Path;
+
+use buttercupql::{
+    Diagnostic, Dialect, FileLoader, Options, Param, ParamStyle, Schema, Severity, SourceFile,
+    Value,
+};
 
 const HELP: &str = "\
 bcql: the ButtercupQL command
@@ -19,10 +24,13 @@ Commands:
   check      Read each file and report every mistake in it
 
 Options:
-  --dialect NAME    The database: sqlite or postgres [default: postgres]
+  --dialect NAME    The database: sqlite, postgres, duckdb or clickhouse
+                    [default: postgres]
   --schema FILE     The database's CREATE TABLE statements, to check names against
-  --params STYLE    Placeholders: dollar ($1), question (?), format (%s) or colon (:p1)
-                    [default: the database's own]
+  --query NAME      Compile a named query or a query def of the file, with the
+                    def's parameters left as placeholders
+  --params STYLE    Placeholders: dollar ($1), question (?), format (%s),
+                    colon (:p1) or braces ({p1:String}) [default: the database's own]
   --json            Write the SQL and its parameters as JSON
   --color WHEN      Colour the messages: auto, always or never [default: auto]
 
@@ -104,6 +112,7 @@ impl Color {
 struct Args {
     dialect: Dialect,
     schema: Option<String>,
+    query: Option<String>,
     params: Option<ParamStyle>,
     json: bool,
     color: Color,
@@ -115,6 +124,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
     let mut parsed = Args {
         dialect: Dialect::Postgres,
         schema: None,
+        query: None,
         params: None,
         json: false,
         color: Color::Auto,
@@ -143,6 +153,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
                     .map_err(|error: buttercupql::UnknownDialect| error.to_string())?;
             }
             "--schema" => parsed.schema = Some(value("a file of CREATE TABLE statements")?),
+            "--query" => parsed.query = Some(value("the name of a query or a query def")?),
             "--params" => {
                 parsed.params = Some(
                     match value("a style: dollar, question, format or colon")?.as_str() {
@@ -150,9 +161,10 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
                         "question" | "qmark" => ParamStyle::Question,
                         "format" => ParamStyle::Format,
                         "colon" | "named" => ParamStyle::Colon,
+                        "braces" => ParamStyle::Braces,
                         other => {
                             return Err(format!(
-                                "`--params` takes dollar, question, format or colon, not `{other}`"
+                                "`--params` takes dollar, question, format, colon or braces, not `{other}`"
                             ));
                         }
                     },
@@ -212,29 +224,58 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
             return Ok(ExitCode::FAILURE);
         }
     };
-    let mut options = Options::new(args.dialect);
+    let loader = loader_for(&name);
+    let mut options = Options::new(args.dialect)
+        .with_name(&name)
+        .with_loader(&loader);
     if let Some(schema) = &schema {
         options = options.with_schema(schema);
     }
     if let Some(style) = args.params {
         options = options.with_params(style);
     }
+    if let Some(query) = &args.query {
+        options = options.with_query(query);
+    }
     let source = SourceFile::new(&name, &text);
     match buttercupql::compile(&text, &options) {
         Ok(compiled) => {
             show(&compiled.warnings, &source, color);
+            let params: Vec<String> = compiled.params.iter().map(json_param).collect();
             if args.json {
-                let params: Vec<String> = compiled.params.iter().map(json_value).collect();
+                let arguments: Vec<String> = compiled
+                    .args
+                    .iter()
+                    .map(|arg| {
+                        let default = arg.default.as_ref().map_or("null".to_string(), json_value);
+                        format!(
+                            "{{\"name\": {}, \"type\": {}, \"default\": {default}}}",
+                            json_string(&arg.name),
+                            json_string(arg.ty.describe())
+                        )
+                    })
+                    .collect();
                 println!(
-                    "{{\"sql\": {}, \"params\": [{}]}}",
+                    "{{\"sql\": {}, \"params\": [{}], \"args\": [{}]}}",
                     json_string(&compiled.sql),
-                    params.join(", ")
+                    params.join(", "),
+                    arguments.join(", ")
                 );
             } else {
                 println!("{}", compiled.sql);
                 if !compiled.params.is_empty() {
-                    let params: Vec<String> = compiled.params.iter().map(json_value).collect();
                     println!("-- parameters: [{}]", params.join(", "));
+                }
+                if !compiled.args.is_empty() {
+                    let arguments: Vec<String> = compiled
+                        .args
+                        .iter()
+                        .map(|arg| match &arg.default {
+                            Some(default) => format!("{} = {}", arg.name, json_value(default)),
+                            None => arg.name.clone(),
+                        })
+                        .collect();
+                    println!("-- arguments: {}", arguments.join(", "));
                 }
             }
             Ok(ExitCode::SUCCESS)
@@ -249,6 +290,15 @@ fn compile(args: &[String]) -> Result<ExitCode, String> {
             Ok(ExitCode::FAILURE)
         }
     }
+}
+
+/// A loader for the modules a file imports: absolute imports from the file's folder.
+fn loader_for(name: &str) -> FileLoader {
+    let folder = Path::new(name)
+        .parent()
+        .filter(|folder| !folder.as_os_str().is_empty())
+        .map_or_else(|| Path::new(".").to_path_buf(), Path::to_path_buf);
+    FileLoader::new(folder)
 }
 
 fn show(problems: &[Diagnostic], source: &SourceFile<'_>, color: bool) {
@@ -287,7 +337,10 @@ fn check(args: &[String]) -> Result<ExitCode, String> {
         let problems = if parsed.has_errors() || parsed.file.query.is_none() {
             parsed.diagnostics
         } else {
-            let mut options = Options::new(args.dialect);
+            let loader = loader_for(&name);
+            let mut options = Options::new(args.dialect)
+                .with_name(&name)
+                .with_loader(&loader);
             if let Some(schema) = &schema {
                 options = options.with_schema(schema);
             }
@@ -353,6 +406,13 @@ fn count(n: usize, word: &str) -> String {
         format!("1 {word}")
     } else {
         format!("{n} {word}s")
+    }
+}
+
+fn json_param(param: &Param) -> String {
+    match param {
+        Param::Value(value) => json_value(value),
+        Param::Arg(name) => format!("{{\"arg\": {}}}", json_string(name)),
     }
 }
 

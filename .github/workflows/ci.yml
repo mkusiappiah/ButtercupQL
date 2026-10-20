@@ -29,7 +29,7 @@ jobs:
         run: cargo test --workspace --exclude db-tests
 
   databases:
-    name: Run the SQL on SQLite and PostgreSQL
+    name: Run the SQL on SQLite, PostgreSQL, DuckDB and ClickHouse
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -44,10 +44,33 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      clickhouse:
+        image: clickhouse/clickhouse-server:25.8
+        env:
+          # Also made for this job alone.
+          CLICKHOUSE_USER: bcql
+          CLICKHOUSE_PASSWORD: bcql
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+        ports:
+          - 8123:8123
+        options: >-
+          --health-cmd "clickhouse-client --user bcql --password bcql --query 'SELECT 1'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     env:
       BCQL_POSTGRES_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      BCQL_CLICKHOUSE_URL: http://localhost:8123
+      BCQL_CLICKHOUSE_USER: bcql
+      BCQL_CLICKHOUSE_PASSWORD: bcql
+      BCQL_DUCKDB_PYTHON: python
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: DuckDB
+        run: python -m pip install duckdb
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy

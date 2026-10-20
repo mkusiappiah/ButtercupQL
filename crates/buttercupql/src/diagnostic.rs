@@ -1,8 +1,18 @@
 //! Problems found in ButtercupQL source text, and how they are shown.
 
 use std::fmt;
+use std::sync::Arc;
 
 use crate::span::Span;
+
+/// A text and its name, such as a file's path: the source of a module, for showing its problems.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SourceText {
+    /// The name messages show for the text.
+    pub name: String,
+    /// The text.
+    pub text: String,
+}
 
 /// How serious a problem is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -47,6 +57,8 @@ pub struct Diagnostic {
     pub related: Vec<Label>,
     /// How to put it right, when the message and the label do not say.
     pub help: Vec<String>,
+    /// The text the problem is in, when it is not the one compiled but a module it imports.
+    pub file: Option<Arc<SourceText>>,
 }
 
 impl Diagnostic {
@@ -68,6 +80,7 @@ impl Diagnostic {
             label: String::new(),
             related: Vec::new(),
             help: Vec::new(),
+            file: None,
         }
     }
 
@@ -105,8 +118,16 @@ impl Diagnostic {
     ///   │              ^ `=` gives a column a value; `==` compares two values
     /// ```
     ///
-    /// With `color`, the text holds the terminal codes that colour it.
+    /// With `color`, the text holds the terminal codes that colour it. A problem in a module is shown in the
+    /// module's own text.
     pub fn render(&self, file: &SourceFile<'_>, color: bool) -> String {
+        match &self.file {
+            Some(own) => self.render_in(&SourceFile::new(&own.name, &own.text), color),
+            None => self.render_in(file, color),
+        }
+    }
+
+    fn render_in(&self, file: &SourceFile<'_>, color: bool) -> String {
         let paint = Paint::new(color);
         let accent = match self.severity {
             Severity::Error => paint.red,

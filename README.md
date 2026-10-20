@@ -5,7 +5,7 @@
 **A Python-like language for SQL**, named after the buttercup flower.
 
 Write a query the way you would write Python, one step per line in the order the data flows. ButtercupQL compiles it to
-the SQL your database already runs: SQLite and PostgreSQL first, then DuckDB and ClickHouse.
+the SQL your database already runs: SQLite, PostgreSQL, DuckDB and ClickHouse.
 
 ```python
 # Critical cases nobody has taken, riskiest first
@@ -66,8 +66,8 @@ ORDER BY money DESC
 
 ## Python's meaning, on every database
 
-The same query gives the same rows on SQLite and PostgreSQL, and they are the rows Python's meaning gives. Every rule
-below is checked by running queries on both databases:
+The same query gives the same rows on SQLite, PostgreSQL, DuckDB and ClickHouse, and they are the rows Python's meaning
+gives. Every rule below is checked by running queries on all four databases:
 
 | ButtercupQL | Gives | Where SQL alone would give |
 |---|---|---|
@@ -80,15 +80,53 @@ below is checked by running queries on both databases:
 | `notes.startswith("ab")` | notes that start `ab` | on SQLite, `AB` too: its `LIKE` ignores case |
 | `sum(x)` of no rows | `0` | `NULL` |
 
+## Window functions, links and queries with arguments
+
+```python
+from cases
+where account.operator == "Acme"              # a link: cases.account_id points to accounts
+place = rank(over=account_id, sort=-risk)     # a window: 1 for each account's riskiest case
+where place <= 3
+```
+
+- **Window functions** are totals with `over=`, `sort=` or `rows=`: `sum(amount, sort=time)` is a running total and
+  `mean(amount, sort=day, rows=7)` a moving one. `row_number()`, `rank()`, `lag()`, `lead()`, `first()` and `last()`
+  work the same way.
+- **Links** follow the schema's `REFERENCES`: `account.operator` reads the operator of the account a case points to, and
+  the compiler writes the join.
+- **Queries with arguments.** A query `def` compiled with `--query` keeps its parameters as placeholders, given when the
+  query runs:
+
+```python
+def for_operator(operator: str, rows: int = 10):
+    from cases
+    where account.operator == operator
+    take rows
+```
+
+```text
+$ bcql compile report.bcql --schema schema.sql --query for_operator
+SELECT cases.*
+FROM cases
+LEFT JOIN accounts AS account ON cases.account_id = account.id
+WHERE account.operator = $1
+LIMIT $2
+-- parameters: [{"arg": "operator"}, {"arg": "rows"}]
+-- arguments: operator, rows = 10
+```
+
+- **Modules.** `from shared import recent` reads `shared.bcql` beside the file, as Python's imports do.
+
 ## Try it
 
 With [Rust](https://rustup.rs) installed:
 
 ```sh
 cargo install --git https://github.com/mkusiappiah/ButtercupQL bcql
-bcql compile query.bcql                    # PostgreSQL, with $1 placeholders
-bcql compile query.bcql --dialect sqlite   # SQLite, with ?
-bcql check --schema schema.sql *.bcql      # names checked against the tables
+bcql compile query.bcql                        # PostgreSQL, with $1 placeholders
+bcql compile query.bcql --dialect clickhouse   # also sqlite and duckdb
+bcql compile query.bcql --query for_operator   # a query def, its arguments left open
+bcql check --schema schema.sql *.bcql          # names checked against the tables
 ```
 
 or, in a copy of this repository, `cargo run -p bcql -- compile examples/open_critical.bcql`.
@@ -130,9 +168,9 @@ On failure, `compile` returns every problem found; `render` shows one as `bcql` 
 ## Status
 
 The language design is approved: [docs/design.md](docs/design.md) describes it, and
-[docs/research.md](docs/research.md) the research behind it. The compiler is built for SQLite and PostgreSQL. Each
-example compiles to the SQL kept beside it in [examples/](examples), and the test suite runs its queries on both
-databases. DuckDB and ClickHouse come next.
+[docs/research.md](docs/research.md) the research behind it. The compiler is built for SQLite, PostgreSQL, DuckDB and
+ClickHouse. Each example compiles to the SQL kept beside it in [examples/](examples), and the test suite runs its
+queries on all four databases.
 
 ## Roadmap
 
@@ -140,18 +178,21 @@ databases. DuckDB and ClickHouse come next.
 2. **Core:** tokens, the parser, error messages and `bcql check` (done)
 3. **Compiler:** filtering, sorting, selecting, grouping, joins, named queries and `def`, compiling to SQLite and
    PostgreSQL, tested against both (done)
-4. **More:** imports, window functions and links; DuckDB and ClickHouse
+4. **More:** imports, window functions, links and queries with arguments; DuckDB and ClickHouse (done)
 5. **Publishing:** the `buttercupql` Python package on PyPI, documentation, editor support and a browser playground
 
 ## Building
 
 ButtercupQL is written in Rust (edition 2024). The library and the command have no dependencies. The workspace holds
 three crates: [`buttercupql`](crates/buttercupql), the library; [`bcql`](crates/bcql), the command; and
-[`db-tests`](crates/db-tests), which runs the SQL on SQLite, and on PostgreSQL when `BCQL_POSTGRES_URL` names one.
+[`db-tests`](crates/db-tests), which runs the SQL on real databases: SQLite always, and the others when they are given.
 
 ```sh
 cargo test --workspace
-BCQL_POSTGRES_URL=postgresql://localhost/test cargo test -p db-tests
+BCQL_POSTGRES_URL=postgresql://localhost/test \
+BCQL_DUCKDB_PYTHON=python3 \
+BCQL_CLICKHOUSE_URL=http://localhost:8123 \
+cargo test -p db-tests
 ```
 
 ## Licence

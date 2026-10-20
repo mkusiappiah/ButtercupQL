@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- DuckDB and ClickHouse, in their own forms: ClickHouse's `{p1:String}` placeholders, `countIf()` and `sumIf()`,
+  `maxOrNull()` for the total of no rows, and `join_use_nulls` for left joins; DuckDB's `QUALIFY`.
+- Window functions: totals with `over=`, `sort=` and `rows=` for running and moving totals, and `row_number()`,
+  `rank()`, `dense_rank()`, `lag()`, `lead()`, `first()` and `last()`.
+- Links: `account.operator` follows the schema's `REFERENCES` and writes the join.
+- Queries with arguments: `--query` compiles a query `def` with its parameters as placeholders, and `bind()` gives
+  their values, with defaults.
+- Modules: `import shared` and `from shared import recent` read other files' definitions, through a loader; a mistake
+  in a module is shown in the module's text.
+- Tests on real DuckDB and ClickHouse, beside SQLite and PostgreSQL.
 - The compiler, for SQLite and PostgreSQL: every step, Python's expressions with Python's meaning, grouping with
   totals and their conditions, joins, named queries and `def`. One flat `SELECT` is written where the steps allow, and
   a subquery only where the meaning needs one. Strings become parameters.

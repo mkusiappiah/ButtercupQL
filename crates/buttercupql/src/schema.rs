@@ -108,6 +108,17 @@ pub struct Column {
     pub ty: Type,
     /// Whether it can be missing (SQL's `NULL`).
     pub nullable: bool,
+    /// The row of another table the column points to, when it holds that row's key: SQL's `REFERENCES`.
+    pub references: Option<Reference>,
+}
+
+/// A column of another table that a column points to: `accounts.id` for `account_id REFERENCES accounts (id)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reference {
+    /// The table pointed to.
+    pub table: String,
+    /// Its column that holds the key.
+    pub column: String,
 }
 
 impl Column {
@@ -117,6 +128,7 @@ impl Column {
             name: name.into(),
             ty,
             nullable: true,
+            references: None,
         }
     }
 
@@ -125,6 +137,29 @@ impl Column {
     pub fn not_null(mut self) -> Column {
         self.nullable = false;
         self
+    }
+
+    /// The column, marked as holding the key of another table's rows. A query follows it with a dot: a column
+    /// `account_id` that points to `accounts` makes `account.operator` read the account's operator.
+    #[must_use]
+    pub fn references(mut self, table: impl Into<String>, column: impl Into<String>) -> Column {
+        self.references = Some(Reference {
+            table: table.into(),
+            column: column.into(),
+        });
+        self
+    }
+
+    /// The name a query follows the column's reference by: the column's name without `_id`, so `account_id` is
+    /// followed as `account`.
+    pub fn link(&self) -> Option<&str> {
+        self.references.as_ref()?;
+        Some(
+            self.name
+                .strip_suffix("_id")
+                .filter(|stem| !stem.is_empty())
+                .unwrap_or(&self.name),
+        )
     }
 }
 
@@ -221,13 +256,31 @@ impl Schema {
         let tokens = sql_tokens(text);
         let mut schema = Schema::new();
         let mut problems = Vec::new();
+        let mut keys: Vec<(String, Vec<String>)> = Vec::new();
         let mut at = 0;
         while at < tokens.len() {
             let end = statement_end(&tokens, at);
-            if let Some(table) = create_table(text, &tokens[at..end], &mut problems) {
+            if let Some((table, primary)) = create_table(text, &tokens[at..end], &mut problems) {
+                keys.push((table.name.clone(), primary));
                 schema.add_table(table);
             }
             at = end + 1;
+        }
+        // `REFERENCES accounts` with no column points to the table's key.
+        for table in &mut schema.tables {
+            for column in &mut table.columns {
+                if let Some(reference) = &mut column.references {
+                    if reference.column.is_empty() {
+                        let key = keys
+                            .iter()
+                            .find(|(name, _)| name.eq_ignore_ascii_case(&reference.table))
+                            .and_then(|(_, primary)| {
+                                (primary.len() == 1).then(|| primary[0].clone())
+                            });
+                        reference.column = key.unwrap_or_else(|| "id".to_string());
+                    }
+                }
+            }
         }
         if problems.is_empty() {
             Ok(schema)
@@ -385,8 +438,57 @@ fn statement_end(tokens: &[SqlToken], mut at: usize) -> usize {
     at
 }
 
-/// The table a statement creates, if it is a `CREATE TABLE` with a list of columns.
-fn create_table(text: &str, tokens: &[SqlToken], problems: &mut Vec<Diagnostic>) -> Option<Table> {
+/// What follows `REFERENCES`: the table, and the column if one is given. An empty column is the table's key.
+fn reference(tokens: &[SqlToken]) -> Option<Reference> {
+    let mut at = tokens.iter().position(|token| token.is("references"))? + 1;
+    let mut table = Vec::new();
+    while let Some(token) = tokens.get(at) {
+        if !matches!(token.kind, Kind::Word | Kind::Quoted) {
+            break;
+        }
+        table.push(token.text.clone());
+        at += 1;
+        if !tokens.get(at).is_some_and(|token| token.is_punct(".")) {
+            break;
+        }
+        at += 1;
+    }
+    if table.is_empty() {
+        return None;
+    }
+    let column = match (tokens.get(at), tokens.get(at + 1)) {
+        (Some(open), Some(column))
+            if open.is_punct("(") && matches!(column.kind, Kind::Word | Kind::Quoted) =>
+        {
+            column.text.clone()
+        }
+        _ => String::new(),
+    };
+    Some(Reference {
+        table: table.join("."),
+        column,
+    })
+}
+
+/// The names in the first brackets of a list of tokens: `(a, b)`.
+fn bracketed_names(tokens: &[SqlToken]) -> Vec<String> {
+    let Some(open) = tokens.iter().position(|token| token.is_punct("(")) else {
+        return Vec::new();
+    };
+    tokens[open + 1..]
+        .iter()
+        .take_while(|token| !token.is_punct(")"))
+        .filter(|token| matches!(token.kind, Kind::Word | Kind::Quoted))
+        .map(|token| token.text.clone())
+        .collect()
+}
+
+/// The table a statement creates, if it is a `CREATE TABLE` with a list of columns, and its key's columns.
+fn create_table(
+    text: &str,
+    tokens: &[SqlToken],
+    problems: &mut Vec<Diagnostic>,
+) -> Option<(Table, Vec<String>)> {
     let mut at = 0;
     let word = |at: usize, word: &str| tokens.get(at).is_some_and(|token| token.is(word));
     if !word(at, "create") {
@@ -467,6 +569,7 @@ fn create_table(text: &str, tokens: &[SqlToken], problems: &mut Vec<Diagnostic>)
 
     let mut columns: Vec<Column> = Vec::new();
     let mut primary: Vec<String> = Vec::new();
+    let mut foreign_keys: Vec<(String, Reference)> = Vec::new();
     for part in split_commas(&tokens[open + 1..close]) {
         let Some(first) = part.first() else {
             continue;
@@ -485,14 +588,13 @@ fn create_table(text: &str, tokens: &[SqlToken], problems: &mut Vec<Diagnostic>)
         if constraint {
             // `PRIMARY KEY (a, b)` makes its columns never missing.
             if let Some(key) = part.iter().position(|token| token.is("primary")) {
-                if let Some(open) = part[key..].iter().position(|token| token.is_punct("(")) {
-                    primary.extend(
-                        part[key + open + 1..]
-                            .iter()
-                            .take_while(|token| !token.is_punct(")"))
-                            .filter(|token| matches!(token.kind, Kind::Word | Kind::Quoted))
-                            .map(|token| token.text.clone()),
-                    );
+                primary.extend(bracketed_names(&part[key..]));
+            }
+            // `FOREIGN KEY (account_id) REFERENCES accounts (id)` makes the column point to the other table.
+            if let Some(foreign) = part.iter().position(|token| token.is("foreign")) {
+                let from = bracketed_names(&part[foreign..]);
+                if let ([column], Some(target)) = (from.as_slice(), reference(&part[foreign..])) {
+                    foreign_keys.push((column.clone(), target));
                 }
             }
             continue;
@@ -532,11 +634,23 @@ fn create_table(text: &str, tokens: &[SqlToken], problems: &mut Vec<Diagnostic>)
             .windows(2)
             .any(|pair| pair[0].is("not") && pair[1].is("null"))
             || rest.iter().any(|token| token.is("primary"));
+        if rest.iter().any(|token| token.is("primary")) {
+            primary.push(first.text.clone());
+        }
         columns.push(Column {
             name: first.text.clone(),
             ty: Type::from_sql(type_name),
             nullable: !not_null,
+            references: reference(rest),
         });
+    }
+    for (name, target) in foreign_keys {
+        if let Some(column) = columns
+            .iter_mut()
+            .find(|column| column.name.eq_ignore_ascii_case(&name))
+        {
+            column.references = Some(target);
+        }
     }
     for column in &mut columns {
         if primary
@@ -546,10 +660,13 @@ fn create_table(text: &str, tokens: &[SqlToken], problems: &mut Vec<Diagnostic>)
             column.nullable = false;
         }
     }
-    Some(Table {
-        name: name.join("."),
-        columns,
-    })
+    Some((
+        Table {
+            name: name.join("."),
+            columns,
+        },
+        primary,
+    ))
 }
 
 /// The parts of a list, split at its commas outside brackets.
@@ -637,6 +754,46 @@ mod tests {
                 .expect("names match without regard to case")
                 .nullable
         );
+    }
+
+    #[test]
+    fn references_are_read_from_columns_and_constraints() {
+        let schema = Schema::from_sql(
+            "\
+CREATE TABLE banks (code text PRIMARY KEY, name text);
+CREATE TABLE accounts (id bigint PRIMARY KEY, bank text REFERENCES banks, operator text);
+CREATE TABLE cases (
+    id bigint PRIMARY KEY,
+    account_id bigint,
+    owner_id bigint REFERENCES people (person),
+    CONSTRAINT to_account FOREIGN KEY (account_id) REFERENCES accounts (id)
+);",
+        )
+        .expect("the schema reads");
+        let cases = schema.table("cases").expect("cases");
+        let account = cases.column("account_id").expect("account_id");
+        assert_eq!(
+            account.references,
+            Some(Reference {
+                table: "accounts".to_string(),
+                column: "id".to_string()
+            })
+        );
+        assert_eq!(account.link(), Some("account"));
+        assert_eq!(
+            cases.column("owner_id").and_then(Column::link),
+            Some("owner")
+        );
+        let bank = schema
+            .table("accounts")
+            .and_then(|table| table.column("bank"))
+            .expect("bank");
+        assert_eq!(
+            bank.references.as_ref().map(|r| r.column.as_str()),
+            Some("code")
+        );
+        assert_eq!(bank.link(), Some("bank"));
+        assert_eq!(cases.column("id").and_then(Column::link), None);
     }
 
     #[test]

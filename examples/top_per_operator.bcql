@@ -1,0 +1,7 @@
+# The three riskiest open cases of each operator: a window function ranks each operator's cases
+from cases
+where status == "open"
+place = rank(over=operator, sort=-risk)
+where place <= 3
+sort operator, place
+select operator, key, risk, place

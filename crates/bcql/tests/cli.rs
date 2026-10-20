@@ -168,7 +168,7 @@ LIMIT 20
     );
     assert_eq!(
         text(&json.stdout),
-        "{\"sql\": \"SELECT *\\nFROM t\\nWHERE a = %s\", \"params\": [\"x\\\"y\"]}\n"
+        "{\"sql\": \"SELECT *\\nFROM t\\nWHERE a = %s\", \"params\": [\"x\\\"y\"], \"args\": []}\n"
     );
 }
 
@@ -219,5 +219,51 @@ fn compile_shows_every_mistake_at_its_place() {
             .status
             .code(),
         Some(2)
+    );
+}
+
+#[test]
+fn compile_reads_modules_and_leaves_a_defs_arguments_open() {
+    let folder = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("bcql-modules");
+    std::fs::create_dir_all(&folder).expect("a folder for the files");
+    std::fs::write(
+        folder.join("shared.bcql"),
+        "def recent(days_back=7):\n    where raised > now() - days(days_back)\n",
+    )
+    .expect("the module is written");
+    std::fs::write(
+        folder.join("report.bcql"),
+        "from shared import recent\n\ndef open_for(account: str):\n    from cases\n    where account_id == account\n    recent(30)\n",
+    )
+    .expect("the report is written");
+    let report = folder.join("report.bcql").display().to_string();
+    let out = bcql(
+        &[
+            "compile",
+            &report,
+            "--query",
+            "open_for",
+            "--dialect",
+            "sqlite",
+        ],
+        "",
+    );
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(
+        text(&out.stdout),
+        "SELECT *\nFROM cases\nWHERE account_id = ? AND raised > datetime('now', '-30 days')\n-- parameters: [{\"arg\": \"account\"}]\n-- arguments: account\n"
+    );
+    std::fs::write(
+        folder.join("broken.bcql"),
+        "from shared import recnt\nfrom cases\n",
+    )
+    .expect("written");
+    let broken = folder.join("broken.bcql").display().to_string();
+    let out = bcql(&["compile", &broken], "");
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains("did you mean `recent`?"),
+        "{}",
+        text(&out.stderr)
     );
 }

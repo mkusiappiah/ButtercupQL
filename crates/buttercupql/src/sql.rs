@@ -1,9 +1,10 @@
 //! The SQL ButtercupQL writes: a small syntax tree of the `SELECT` statements it builds, and the writer that turns
 //! one into text, with its parameters in the order they appear.
 
-use std::fmt::Write;
+use std::collections::HashMap;
 
 use crate::dialect::Dialect;
+use crate::schema::Type;
 
 /// A value passed to the database beside the SQL, for one of its placeholders.
 #[derive(Debug, Clone, PartialEq)]
@@ -20,25 +21,37 @@ pub enum Value {
     Text(String),
 }
 
+/// What goes in one of the SQL's placeholders.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Param {
+    /// A value written in the query.
+    Value(Value),
+    /// An argument of the query compiled, given when the query runs. See [`crate::Compiled::bind`].
+    Arg(String),
+}
+
 /// How placeholders for parameters are written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ParamStyle {
-    /// `$1`, `$2`: PostgreSQL's own, as asyncpg, node-postgres and Rust's sqlx and tokio-postgres take them.
+    /// `$1`, `$2`: as PostgreSQL and DuckDB take them, and asyncpg, node-postgres and Rust's sqlx and tokio-postgres.
     Dollar,
     /// `?`: SQLite's, as Python's `sqlite3` takes them.
     Question,
     /// `%s`: as Python's psycopg takes them. A `%` in the SQL is then written `%%`.
     Format,
-    /// `:p1`, `:p2`: named.
+    /// `:p1`, `:p2`, and an argument by its name: `:account`.
     Colon,
+    /// `{p1:String}`, and an argument by its name: `{account:String}`. ClickHouse's own, with each value's type.
+    Braces,
 }
 
 impl ParamStyle {
     /// The style a database's own drivers take.
     pub fn of(dialect: Dialect) -> ParamStyle {
         match dialect {
-            Dialect::Postgres => ParamStyle::Dollar,
-            _ => ParamStyle::Question,
+            Dialect::Postgres | Dialect::DuckDb => ParamStyle::Dollar,
+            Dialect::Sqlite => ParamStyle::Question,
+            Dialect::ClickHouse => ParamStyle::Braces,
         }
     }
 }
@@ -56,9 +69,13 @@ pub(crate) struct Select {
     pub(crate) group: Vec<Expr>,
     /// The conditions of `HAVING`.
     pub(crate) having: Vec<Expr>,
+    /// The conditions of `QUALIFY`, which hold after window functions are worked out.
+    pub(crate) qualify: Vec<Expr>,
     pub(crate) order: Vec<Order>,
-    pub(crate) limit: Option<u64>,
-    pub(crate) offset: u64,
+    pub(crate) limit: Option<Count>,
+    pub(crate) offset: Option<Count>,
+    /// ClickHouse's settings for the query: `SETTINGS join_use_nulls = 1`.
+    pub(crate) settings: Vec<(&'static str, &'static str)>,
 }
 
 impl Select {
@@ -66,6 +83,26 @@ impl Select {
     fn qualified(&self) -> bool {
         !self.joins.is_empty()
     }
+
+    /// Whether the statement, or a query inside it, has a `LEFT JOIN`.
+    pub(crate) fn has_left_join(&self) -> bool {
+        let inside = |source: &Source| match &source.kind {
+            SourceKind::Query(select) => select.has_left_join(),
+            SourceKind::Table(_) => false,
+        };
+        self.joins
+            .iter()
+            .any(|join| join.left || inside(&join.source))
+            || self.from.as_ref().is_some_and(inside)
+    }
+}
+
+/// A count of rows for `LIMIT` and `OFFSET`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Count {
+    Rows(u64),
+    /// A count given when the query runs.
+    Param(Param),
 }
 
 /// A column of a `SELECT`.
@@ -73,6 +110,8 @@ impl Select {
 pub(crate) enum Item {
     /// `*`, every column of every table read.
     Star,
+    /// `table.*`, every column of one table.
+    TableStar(String),
     /// A value, and the name it is given.
     Expr { expr: Expr, alias: Option<String> },
 }
@@ -107,6 +146,17 @@ pub(crate) struct Order {
     pub(crate) nulls_last: bool,
 }
 
+/// The rows a window function works over, around each row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Frame {
+    /// From the first row to this one: a running total.
+    Running,
+    /// This row and the ones before it, as many as given in all: a moving total.
+    Last(u64),
+    /// Every row of the partition.
+    Whole,
+}
+
 /// An SQL expression.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Expr {
@@ -115,8 +165,8 @@ pub(crate) enum Expr {
         table: Option<String>,
         name: String,
     },
-    /// A value passed as a parameter.
-    Param(Value),
+    /// A placeholder, and the type of what goes in it.
+    Param(Param, Type),
     /// SQL the compiler wrote itself, such as `TRUE`, `NULL` or `CURRENT_DATE`. Never text from a query.
     Keyword(&'static str),
     /// A number, already checked to be digits.
@@ -125,6 +175,8 @@ pub(crate) enum Expr {
     Text(String),
     /// A typed string: `DATE '2026-10-20'`, `INTERVAL '7 days'`.
     Typed(&'static str, String),
+    /// ClickHouse's length of time: `INTERVAL 7 DAY`.
+    Interval(Box<Expr>, &'static str),
     Unary(Unary, Box<Expr>),
     Binary(Binary, Box<Expr>, Box<Expr>),
     /// A function: `lower(name)`.
@@ -135,6 +187,13 @@ pub(crate) enum Expr {
         arg: Option<Box<Expr>>,
         distinct: bool,
         filter: Option<Box<Expr>>,
+    },
+    /// A window function: `rank() OVER (PARTITION BY operator ORDER BY risk DESC)`.
+    Window {
+        function: Box<Expr>,
+        partition: Vec<Expr>,
+        order: Vec<Order>,
+        frame: Option<Frame>,
     },
     /// `x IS NULL`, or `x IS NOT NULL`.
     IsNull(Box<Expr>, bool),
@@ -250,6 +309,14 @@ impl Expr {
         Expr::Unary(Unary::Not, Box::new(expr))
     }
 
+    pub(crate) fn text(value: &str) -> Expr {
+        Expr::Param(Param::Value(Value::Text(value.to_string())), Type::Text)
+    }
+
+    pub(crate) fn number(digits: &str) -> Expr {
+        Expr::Number(digits.to_string())
+    }
+
     fn precedence(&self) -> u8 {
         match self {
             Expr::Binary(op, _, _) => op.precedence(),
@@ -270,7 +337,10 @@ impl Expr {
 /// SQL text and its parameters.
 pub(crate) struct Written {
     pub(crate) sql: String,
-    pub(crate) params: Vec<Value>,
+    /// What goes in each placeholder, in order.
+    pub(crate) params: Vec<Param>,
+    /// Each placeholder's name: `p1`, `p2` for values, and an argument's own name.
+    pub(crate) names: Vec<String>,
 }
 
 /// Writes a statement as text for a database.
@@ -280,12 +350,25 @@ pub(crate) fn write(select: &Select, dialect: Dialect, style: ParamStyle) -> Wri
         style,
         out: String::new(),
         params: Vec::new(),
+        names: Vec::new(),
+        values: 0,
+        numbered: HashMap::new(),
         qualified: false,
     };
     writer.select(select, 0);
+    if !select.settings.is_empty() {
+        let settings: Vec<String> = select
+            .settings
+            .iter()
+            .map(|(name, value)| format!("{name} = {value}"))
+            .collect();
+        writer.line(0);
+        writer.push(&format!("SETTINGS {}", settings.join(", ")));
+    }
     Written {
         sql: writer.out,
         params: writer.params,
+        names: writer.names,
     }
 }
 
@@ -293,7 +376,12 @@ struct Writer {
     dialect: Dialect,
     style: ParamStyle,
     out: String,
-    params: Vec<Value>,
+    params: Vec<Param>,
+    names: Vec<String>,
+    /// How many values have been given placeholders.
+    values: usize,
+    /// The number of each argument's placeholder, for `$1` placeholders, where an argument used twice is written once.
+    numbered: HashMap<String, usize>,
     /// Whether the statement being written reads more than one table.
     qualified: bool,
 }
@@ -331,6 +419,10 @@ impl Writer {
             }
             match item {
                 Item::Star => self.push("*"),
+                Item::TableStar(table) => {
+                    self.ident(table);
+                    self.push(".*");
+                }
                 Item::Expr { expr, alias } => {
                     self.expr(expr, 0, depth);
                     if let Some(alias) = alias {
@@ -376,43 +468,63 @@ impl Writer {
             self.push("HAVING ");
             self.conditions(&select.having, depth);
         }
+        if !select.qualify.is_empty() {
+            self.line(depth);
+            self.push("QUALIFY ");
+            self.conditions(&select.qualify, depth);
+        }
         if !select.order.is_empty() {
             self.line(depth);
             self.push("ORDER BY ");
-            for (n, order) in select.order.iter().enumerate() {
-                if n > 0 {
-                    self.push(", ");
-                }
-                self.expr(&order.expr, 0, depth);
-                if order.descending {
-                    self.push(" DESC");
-                }
-                if order.nulls_last {
-                    self.push(" NULLS LAST");
-                }
-            }
+            self.order(&select.order, depth);
         }
-        match (select.limit, select.offset) {
-            (Some(limit), 0) => {
+        match (&select.limit, &select.offset) {
+            (Some(limit), None) => {
                 self.line(depth);
-                self.push(&format!("LIMIT {limit}"));
+                self.push("LIMIT ");
+                self.count(limit);
             }
-            (Some(limit), offset) => {
+            (Some(limit), Some(offset)) => {
                 self.line(depth);
-                self.push(&format!("LIMIT {limit} OFFSET {offset}"));
+                self.push("LIMIT ");
+                self.count(limit);
+                self.push(" OFFSET ");
+                self.count(offset);
             }
-            (None, 0) => {}
-            (None, offset) => {
+            (None, Some(offset)) => {
                 self.line(depth);
                 if self.dialect == Dialect::Sqlite {
                     // SQLite takes an offset only after a limit, where -1 is no limit.
-                    self.push(&format!("LIMIT -1 OFFSET {offset}"));
-                } else {
-                    self.push(&format!("OFFSET {offset}"));
+                    self.push("LIMIT -1 ");
                 }
+                self.push("OFFSET ");
+                self.count(offset);
             }
+            (None, None) => {}
         }
         self.qualified = outer;
+    }
+
+    fn order(&mut self, order: &[Order], depth: usize) {
+        for (n, key) in order.iter().enumerate() {
+            if n > 0 {
+                self.push(", ");
+            }
+            self.expr(&key.expr, 0, depth);
+            if key.descending {
+                self.push(" DESC");
+            }
+            if key.nulls_last {
+                self.push(" NULLS LAST");
+            }
+        }
+    }
+
+    fn count(&mut self, count: &Count) {
+        match count {
+            Count::Rows(rows) => self.push(&rows.to_string()),
+            Count::Param(param) => self.param(param, Type::Int),
+        }
     }
 
     fn conditions(&mut self, conditions: &[Expr], depth: usize) {
@@ -468,15 +580,49 @@ impl Writer {
         self.push(&quoted);
     }
 
-    fn param(&mut self, value: &Value) {
-        self.params.push(value.clone());
-        let n = self.params.len();
+    fn param(&mut self, param: &Param, ty: Type) {
+        let name = match param {
+            Param::Value(_) => {
+                self.values += 1;
+                format!("p{}", self.values)
+            }
+            Param::Arg(name) => name.clone(),
+        };
         match self.style {
-            ParamStyle::Dollar => self.out.push_str(&format!("${n}")),
+            ParamStyle::Dollar => {
+                // An argument used twice is one placeholder; each value is one of its own.
+                let reused = match param {
+                    Param::Arg(name) => self.numbered.get(name).copied(),
+                    Param::Value(_) => None,
+                };
+                let number = match reused {
+                    Some(number) => number,
+                    None => {
+                        self.params.push(param.clone());
+                        self.names.push(name.clone());
+                        let number = self.params.len();
+                        if let Param::Arg(arg) = param {
+                            self.numbered.insert(arg.clone(), number);
+                        }
+                        number
+                    }
+                };
+                self.out.push_str(&format!("${number}"));
+                return;
+            }
             ParamStyle::Question => self.out.push('?'),
             ParamStyle::Format => self.out.push_str("%s"),
-            ParamStyle::Colon => self.out.push_str(&format!(":p{n}")),
+            ParamStyle::Colon => self.out.push_str(&format!(":{name}")),
+            ParamStyle::Braces => {
+                let ty = match param {
+                    Param::Value(value) => value_type(value),
+                    Param::Arg(_) => clickhouse_type(ty),
+                };
+                self.out.push_str(&format!("{{{name}:{ty}}}"));
+            }
         }
+        self.params.push(param.clone());
+        self.names.push(name);
     }
 
     /// Writes an expression where it must hold together at least as tightly as `context`, in brackets if it does
@@ -501,7 +647,7 @@ impl Writer {
                 }
                 self.ident(name);
             }
-            Expr::Param(value) => self.param(value),
+            Expr::Param(param, ty) => self.param(param, *ty),
             Expr::Keyword(keyword) => self.push(keyword),
             Expr::Number(digits) => self.push(digits),
             Expr::Text(value) => self.text(value),
@@ -509,6 +655,12 @@ impl Writer {
                 self.push(keyword);
                 self.push(" ");
                 self.text(value);
+            }
+            Expr::Interval(amount, unit) => {
+                self.push("INTERVAL ");
+                self.expr(amount, ATOM, depth);
+                self.push(" ");
+                self.push(unit);
             }
             Expr::Unary(Unary::Neg, operand) => {
                 self.push("-");
@@ -584,6 +736,52 @@ impl Writer {
                     self.push(")");
                 }
             }
+            Expr::Window {
+                function,
+                partition,
+                order,
+                frame,
+            } => {
+                self.expr(function, ATOM, depth);
+                self.push(" OVER (");
+                let mut parts = 0;
+                if !partition.is_empty() {
+                    self.push("PARTITION BY ");
+                    for (n, key) in partition.iter().enumerate() {
+                        if n > 0 {
+                            self.push(", ");
+                        }
+                        self.expr(key, 0, depth);
+                    }
+                    parts += 1;
+                }
+                if !order.is_empty() {
+                    if parts > 0 {
+                        self.push(" ");
+                    }
+                    self.push("ORDER BY ");
+                    self.order(order, depth);
+                    parts += 1;
+                }
+                if let Some(frame) = frame {
+                    if parts > 0 {
+                        self.push(" ");
+                    }
+                    match frame {
+                        Frame::Running => {
+                            self.push("ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW")
+                        }
+                        Frame::Last(rows) => self.push(&format!(
+                            "ROWS BETWEEN {} PRECEDING AND CURRENT ROW",
+                            rows.saturating_sub(1)
+                        )),
+                        Frame::Whole => {
+                            self.push("ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING")
+                        }
+                    }
+                }
+                self.push(")");
+            }
             Expr::IsNull(operand, negated) => {
                 self.expr(operand, COMPARE + 1, depth);
                 self.push(if *negated { " IS NOT NULL" } else { " IS NULL" });
@@ -651,14 +849,37 @@ impl Writer {
             Expr::Cast(operand, ty) => {
                 self.push("CAST(");
                 self.expr(operand, 0, depth);
-                let _ = write!(self.out, " AS {ty})");
+                self.push(&format!(" AS {ty})"));
             }
             Expr::Extract(part, operand) => {
-                let _ = write!(self.out, "EXTRACT({part} FROM ");
+                self.push(&format!("EXTRACT({part} FROM "));
                 self.expr(operand, 0, depth);
                 self.push(")");
             }
         }
+    }
+}
+
+/// ClickHouse's type for a value given as a parameter.
+fn value_type(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "Nullable(String)",
+        Value::Bool(_) => "Bool",
+        Value::Int(_) => "Int64",
+        Value::Float(_) => "Float64",
+        Value::Text(_) => "String",
+    }
+}
+
+/// ClickHouse's type for an argument, from its annotation.
+fn clickhouse_type(ty: Type) -> &'static str {
+    match ty {
+        Type::Bool => "Bool",
+        Type::Int => "Int64",
+        Type::Float | Type::Decimal => "Float64",
+        Type::Date => "Date",
+        Type::Timestamp => "DateTime",
+        Type::Text | Type::Unknown | Type::Duration => "String",
     }
 }
 
@@ -676,8 +897,9 @@ pub(crate) fn needs_quotes(name: &str) -> bool {
             .is_ok()
 }
 
-/// The words PostgreSQL or SQLite keep for themselves, which a name must be quoted to use. Sorted, to be searched.
-const RESERVED: [&str; 109] = [
+/// The words PostgreSQL, SQLite, DuckDB or ClickHouse keep for themselves, which a name must be quoted to use.
+/// Sorted, to be searched.
+const RESERVED: [&str; 112] = [
     "ABORT",
     "ALL",
     "ALTER",
@@ -725,6 +947,7 @@ const RESERVED: [&str; 109] = [
     "FALSE",
     "FETCH",
     "FILTER",
+    "FINAL",
     "FOR",
     "FOREIGN",
     "FREEZE",
@@ -765,7 +988,9 @@ const RESERVED: [&str; 109] = [
     "OVER",
     "OVERLAPS",
     "PLACING",
+    "PREWHERE",
     "PRIMARY",
+    "QUALIFY",
     "REFERENCES",
     "RETURNING",
     "RIGHT",
@@ -797,9 +1022,27 @@ mod tests {
         Expr::column(None, name)
     }
 
-    fn written(select: &Select, style: ParamStyle) -> (String, Vec<Value>) {
+    fn text(value: &str) -> Value {
+        Value::Text(value.to_string())
+    }
+
+    fn param(value: &str) -> Expr {
+        Expr::text(value)
+    }
+
+    fn written(select: &Select, style: ParamStyle) -> (String, Vec<Param>) {
         let written = write(select, Dialect::Postgres, style);
         (written.sql, written.params)
+    }
+
+    fn values(params: Vec<Param>) -> Vec<Value> {
+        params
+            .into_iter()
+            .map(|param| match param {
+                Param::Value(value) => value,
+                Param::Arg(name) => panic!("an argument, {name}"),
+            })
+            .collect()
     }
 
     #[test]
@@ -830,7 +1073,7 @@ mod tests {
                     alias: Some("key".to_string()),
                 },
                 Item::Expr {
-                    expr: Expr::binary(Binary::Mul, column("risk"), Expr::Number("2".to_string())),
+                    expr: Expr::binary(Binary::Mul, column("risk"), Expr::number("2")),
                     alias: Some("double risk".to_string()),
                 },
             ],
@@ -839,14 +1082,10 @@ mod tests {
                 alias: None,
             }),
             filter: vec![
-                Expr::binary(
-                    Binary::Eq,
-                    column("status"),
-                    Expr::Param(Value::Text("open".to_string())),
-                ),
+                Expr::binary(Binary::Eq, column("status"), param("open")),
                 Expr::binary(
                     Binary::Or,
-                    Expr::binary(Binary::Gt, column("risk"), Expr::Number("90".to_string())),
+                    Expr::binary(Binary::Gt, column("risk"), Expr::number("90")),
                     Expr::IsNull(Box::new(column("user")), false),
                 ),
             ],
@@ -855,7 +1094,7 @@ mod tests {
                 descending: true,
                 nulls_last: true,
             }],
-            limit: Some(20),
+            limit: Some(Count::Rows(20)),
             ..Select::default()
         };
         let (sql, params) = written(&select, ParamStyle::Dollar);
@@ -868,7 +1107,7 @@ WHERE status = $1 AND (risk > 90 OR \"user\" IS NULL)
 ORDER BY risk DESC NULLS LAST
 LIMIT 20"
         );
-        assert_eq!(params, [Value::Text("open".to_string())]);
+        assert_eq!(values(params), [text("open")]);
         assert!(
             written(&select, ParamStyle::Question)
                 .0
@@ -925,7 +1164,7 @@ LIMIT 20"
                 "a || b || c",
             ),
             (
-                Expr::Unary(Unary::Neg, Box::new(Expr::Number("-5".to_string()))),
+                Expr::Unary(Unary::Neg, Box::new(Expr::number("-5"))),
                 "-(-5)",
             ),
             (
@@ -963,11 +1202,7 @@ LIMIT 20"
                 kind: SourceKind::Table(vec!["cases".to_string()]),
                 alias: None,
             }),
-            filter: vec![Expr::binary(
-                Binary::Eq,
-                column("band"),
-                Expr::Param(Value::Text("high".to_string())),
-            )],
+            filter: vec![Expr::binary(Binary::Eq, column("band"), param("high"))],
             ..Select::default()
         };
         let outer = Select {
@@ -975,11 +1210,7 @@ LIMIT 20"
                 kind: SourceKind::Query(Box::new(inner)),
                 alias: Some("_q1".to_string()),
             }),
-            filter: vec![Expr::binary(
-                Binary::Eq,
-                column("status"),
-                Expr::Param(Value::Text("open".to_string())),
-            )],
+            filter: vec![Expr::binary(Binary::Eq, column("status"), param("open"))],
             ..Select::default()
         };
         let (sql, params) = written(&outer, ParamStyle::Dollar);
@@ -994,17 +1225,15 @@ FROM (
 ) AS _q1
 WHERE status = $2"
         );
-        assert_eq!(
-            params,
-            [
-                Value::Text("high".to_string()),
-                Value::Text("open".to_string())
-            ]
-        );
+        assert_eq!(values(params), [text("high"), text("open")]);
         let (format, _) = written(
             &Select {
                 columns: vec![Item::Expr {
-                    expr: Expr::binary(Binary::Mod, column("a"), Expr::Param(Value::Int(2))),
+                    expr: Expr::binary(
+                        Binary::Mod,
+                        column("a"),
+                        Expr::Param(Param::Value(Value::Int(2)), Type::Int),
+                    ),
                     alias: None,
                 }],
                 ..Select::default()
@@ -1012,6 +1241,95 @@ WHERE status = $2"
             ParamStyle::Format,
         );
         assert_eq!(format, "SELECT a %% %s");
+    }
+
+    #[test]
+    fn an_argument_is_one_placeholder_however_often_it_is_used() {
+        let account = Expr::Param(Param::Arg("account".to_string()), Type::Text);
+        let select = Select {
+            from: Some(Source {
+                kind: SourceKind::Table(vec!["cases".to_string()]),
+                alias: None,
+            }),
+            filter: vec![
+                Expr::binary(Binary::Eq, column("payer"), account.clone()),
+                Expr::binary(Binary::Eq, column("status"), param("open")),
+                Expr::binary(Binary::Eq, column("payee"), account),
+            ],
+            limit: Some(Count::Param(Param::Arg("rows".to_string()))),
+            ..Select::default()
+        };
+        let dollar = write(&select, Dialect::Postgres, ParamStyle::Dollar);
+        assert_eq!(
+            dollar.sql,
+            "SELECT *\nFROM cases\nWHERE payer = $1 AND status = $2 AND payee = $1\nLIMIT $3"
+        );
+        assert_eq!(dollar.names, ["account", "p1", "rows"]);
+        let braces = write(&select, Dialect::ClickHouse, ParamStyle::Braces);
+        assert_eq!(
+            braces.sql,
+            "SELECT *\nFROM cases\nWHERE payer = {account:String} AND status = {p1:String} AND payee = {account:String}\nLIMIT {rows:Int64}"
+        );
+        assert_eq!(braces.names, ["account", "p1", "account", "rows"]);
+        let question = write(&select, Dialect::Sqlite, ParamStyle::Question);
+        assert_eq!(question.params.len(), 4);
+    }
+
+    #[test]
+    fn windows_qualify_and_settings() {
+        let window = Expr::Window {
+            function: Box::new(Expr::call("rank", Vec::new())),
+            partition: vec![column("operator")],
+            order: vec![Order {
+                expr: column("risk"),
+                descending: true,
+                nulls_last: false,
+            }],
+            frame: None,
+        };
+        let running = Expr::Window {
+            function: Box::new(Expr::Aggregate {
+                name: "sum",
+                arg: Some(Box::new(column("amount"))),
+                distinct: false,
+                filter: None,
+            }),
+            partition: Vec::new(),
+            order: vec![Order {
+                expr: column("time"),
+                descending: false,
+                nulls_last: false,
+            }],
+            frame: Some(Frame::Running),
+        };
+        let select = Select {
+            columns: vec![
+                Item::TableStar("cases".to_string()),
+                Item::Expr {
+                    expr: window.clone(),
+                    alias: Some("place".to_string()),
+                },
+                Item::Expr {
+                    expr: running,
+                    alias: Some("so_far".to_string()),
+                },
+            ],
+            from: Some(Source {
+                kind: SourceKind::Table(vec!["cases".to_string()]),
+                alias: None,
+            }),
+            qualify: vec![Expr::binary(Binary::LtEq, window, Expr::number("3"))],
+            settings: vec![("join_use_nulls", "1")],
+            ..Select::default()
+        };
+        assert_eq!(
+            write(&select, Dialect::DuckDb, ParamStyle::Dollar).sql,
+            "\
+SELECT cases.*, rank() OVER (PARTITION BY operator ORDER BY risk DESC) AS place, sum(amount) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS so_far
+FROM cases
+QUALIFY rank() OVER (PARTITION BY operator ORDER BY risk DESC) <= 3
+SETTINGS join_use_nulls = 1"
+        );
     }
 
     #[test]
@@ -1024,5 +1342,25 @@ WHERE status = $2"
             ..Select::default()
         };
         assert_eq!(written(&select, ParamStyle::Dollar).0, "SELECT 'it''s'");
+    }
+
+    #[test]
+    fn an_offset_alone_is_written_as_each_database_takes_it() {
+        let select = Select {
+            from: Some(Source {
+                kind: SourceKind::Table(vec!["t".to_string()]),
+                alias: None,
+            }),
+            offset: Some(Count::Rows(5)),
+            ..Select::default()
+        };
+        assert_eq!(
+            write(&select, Dialect::Sqlite, ParamStyle::Question).sql,
+            "SELECT *\nFROM t\nLIMIT -1 OFFSET 5"
+        );
+        assert_eq!(
+            write(&select, Dialect::Postgres, ParamStyle::Dollar).sql,
+            "SELECT *\nFROM t\nOFFSET 5"
+        );
     }
 }
