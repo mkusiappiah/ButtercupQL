@@ -16,7 +16,7 @@ use crate::suggest;
 mod tests;
 
 /// The words that start a step.
-const STEP_WORDS: [&str; 12] = [
+pub(crate) const STEP_WORDS: [&str; 12] = [
     "from",
     "where",
     "select",

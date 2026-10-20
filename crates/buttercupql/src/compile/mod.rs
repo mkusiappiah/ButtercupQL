@@ -11,6 +11,9 @@ mod expr;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+pub(crate) use call::FUNCTIONS;
+
 use std::collections::HashMap;
 
 use crate::Arg;

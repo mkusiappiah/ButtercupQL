@@ -65,6 +65,32 @@ jobs:
           printf 'from cases\nwhere status == "open"\n' > open.bcql
           bcql compile open.bcql --dialect sqlite
 
+  vscode:
+    name: The VS Code extension
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/vscode
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+      - name: Packages
+        run: npm ci
+      - name: Tests
+        run: npm test
+      - name: Package
+        run: npx vsce package --out buttercupql.vsix
+      - name: The package's bundle loads
+        run: node test/bundle.test.js
+      - uses: actions/upload-artifact@v4
+        with:
+          name: buttercupql-vsix
+          path: editors/vscode/buttercupql.vsix
+
   databases:
     name: Run the SQL on SQLite, PostgreSQL, DuckDB and ClickHouse
     runs-on: ubuntu-latest

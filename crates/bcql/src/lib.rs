@@ -1,9 +1,13 @@
 //! `bcql`, the ButtercupQL command, as a library: the `bcql` program and the Python package both run it.
 
+mod json;
+mod lsp;
+
 use std::io::{self, IsTerminal, Read};
 
 use std::path::Path;
 
+use buttercupql::ast::{ExprKind, Item, StepKind};
 use buttercupql::{
     Diagnostic, Dialect, FileLoader, Options, Param, ParamStyle, Schema, Severity, SourceFile,
     Value,
@@ -15,12 +19,14 @@ bcql: the ButtercupQL command
 Usage:
   bcql compile [OPTIONS] FILE
   bcql check [OPTIONS] FILE...
+  bcql lsp
   bcql --version
   bcql --help
 
 Commands:
   compile    Write the SQL a query compiles to, and its parameters
   check      Read each file and report every mistake in it
+  lsp        Run the language server, for editors, on standard input and output
 
 Options:
   --dialect NAME    The database: sqlite, postgres, duckdb or clickhouse
@@ -63,6 +69,12 @@ fn run(args: &[String]) -> Result<u8, String> {
     match command.as_str() {
         "compile" => compile(rest),
         "check" => check(rest),
+        "lsp" => {
+            if let Some(extra) = rest.iter().find(|arg| arg.as_str() != "--stdio") {
+                return Err(format!("`bcql lsp` takes no `{extra}`"));
+            }
+            Ok(lsp::run())
+        }
         "-h" | "--help" | "help" => {
             print!("{HELP}");
             Ok(SUCCESS)
@@ -73,7 +85,7 @@ fn run(args: &[String]) -> Result<u8, String> {
         }
         other if other.starts_with('-') => Err(format!("unknown option `{other}`")),
         other => Err(format!(
-            "there is no command `{other}`: the commands are `compile` and `check`"
+            "there is no command `{other}`: the commands are `compile`, `check` and `lsp`"
         )),
     }
 }
@@ -335,24 +347,14 @@ fn check(args: &[String]) -> Result<u8, String> {
                 continue;
             }
         };
-        let parsed = buttercupql::parse(&text);
-        // A file with a query is compiled too, for the mistakes only compiling finds; a file of definitions alone
-        // is checked as it reads.
-        let problems = if parsed.has_errors() || parsed.file.query.is_none() {
-            parsed.diagnostics
-        } else {
-            let loader = loader_for(&name);
-            let mut options = Options::new(args.dialect)
-                .with_name(&name)
-                .with_loader(&loader);
-            if let Some(schema) = &schema {
-                options = options.with_schema(schema);
-            }
-            match buttercupql::compile(&text, &options) {
-                Ok(compiled) => compiled.warnings,
-                Err(problems) => problems,
-            }
-        };
+        let loader = loader_for(&name);
+        let mut options = Options::new(args.dialect)
+            .with_name(&name)
+            .with_loader(&loader);
+        if let Some(schema) = &schema {
+            options = options.with_schema(schema);
+        }
+        let problems = problems(&text, &options);
         let source = SourceFile::new(&name, &text);
         show(&problems, &source, color);
         for problem in &problems {
@@ -386,6 +388,61 @@ fn check(args: &[String]) -> Result<u8, String> {
     } else {
         SUCCESS
     })
+}
+
+/// Every problem in a text: those found reading it, and those found compiling its query, its named queries and its
+/// query `def`s, each given once. A `def` of steps is checked as it reads, as it means something only where it is
+/// called.
+fn problems(text: &str, options: &Options<'_>) -> Vec<Diagnostic> {
+    let parsed = buttercupql::parse(text);
+    if parsed.has_errors() {
+        return parsed.diagnostics;
+    }
+    let mut queries: Vec<Option<&str>> = Vec::new();
+    if parsed.file.query.is_some() {
+        queries.push(None);
+    }
+    for item in &parsed.file.items {
+        match item {
+            Item::Let(named) if matches!(named.value.kind, ExprKind::Query(_)) => {
+                queries.push(Some(&named.name.text));
+            }
+            Item::Def(def)
+                if matches!(
+                    def.body.first().map(|step| &step.kind),
+                    Some(StepKind::From(_))
+                ) =>
+            {
+                queries.push(Some(&def.name.text));
+            }
+            _ => {}
+        }
+    }
+    if queries.is_empty() {
+        return parsed.diagnostics;
+    }
+    let mut found: Vec<Diagnostic> = Vec::new();
+    for query in queries {
+        let mut options = *options;
+        options.query = query;
+        let problems = match buttercupql::compile(text, &options) {
+            Ok(compiled) => compiled.warnings,
+            Err(problems) => problems,
+        };
+        for problem in problems {
+            let seen = found.iter().any(|seen| {
+                seen.span == problem.span
+                    && seen.message == problem.message
+                    && seen.file.as_ref().map(|file| &file.name)
+                        == problem.file.as_ref().map(|file| &file.name)
+            });
+            if !seen {
+                found.push(problem);
+            }
+        }
+    }
+    found.sort_by_key(|problem| (problem.file.is_some(), problem.span.start, problem.span.end));
+    found
 }
 
 /// A file's name and its text; `-` is standard input.
@@ -432,19 +489,5 @@ fn json_value(value: &Value) -> String {
 }
 
 fn json_string(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() + 2);
-    out.push('"');
-    for c in text.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
+    json::quote(text)
 }

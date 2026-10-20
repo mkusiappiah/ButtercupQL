@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>ButtercupQL</title>
+  <defs>
+    <radialGradient id="petal" cx="50%" cy="60%" r="60%">
+      <stop offset="0" stop-color="#ffe866"/>
+      <stop offset="1" stop-color="#f4b400"/>
+    </radialGradient>
+    <radialGradient id="heart" cx="45%" cy="40%" r="60%">
+      <stop offset="0" stop-color="#b5d649"/>
+      <stop offset="1" stop-color="#6f9a1f"/>
+    </radialGradient>
+  </defs>
+  <rect width="256" height="256" rx="56" fill="#17402f"/>
+  <g>
+    <circle cx="128.0" cy="81.0" r="43" fill="url(#petal)" stroke="#c98a00" stroke-width="3"/>
+    <circle cx="172.7" cy="113.5" r="43" fill="url(#petal)" stroke="#c98a00" stroke-width="3"/>
+    <circle cx="155.6" cy="166.0" r="43" fill="url(#petal)" stroke="#c98a00" stroke-width="3"/>
+    <circle cx="100.4" cy="166.0" r="43" fill="url(#petal)" stroke="#c98a00" stroke-width="3"/>
+    <circle cx="83.3" cy="113.5" r="43" fill="url(#petal)" stroke="#c98a00" stroke-width="3"/>
+    <ellipse cx="117.3" cy="69.0" rx="15" ry="8" transform="rotate(0.0 117.3 69.0)" fill="#fffbe0" opacity="0.55"/>
+    <ellipse cx="180.8" cy="99.5" rx="15" ry="8" transform="rotate(72.0 180.8 99.5)" fill="#fffbe0" opacity="0.55"/>
+    <ellipse cx="171.4" cy="169.4" rx="15" ry="8" transform="rotate(144.0 171.4 169.4)" fill="#fffbe0" opacity="0.55"/>
+    <ellipse cx="102.0" cy="182.1" rx="15" ry="8" transform="rotate(216.0 102.0 182.1)" fill="#fffbe0" opacity="0.55"/>
+    <ellipse cx="68.5" cy="120.0" rx="15" ry="8" transform="rotate(288.0 68.5 120.0)" fill="#fffbe0" opacity="0.55"/>
+  </g>
+  <circle cx="128" cy="128" r="31" fill="#f7c600"/>
+    <circle cx="153.0" cy="128.0" r="4.2" fill="#e08a00"/>
+    <circle cx="150.5" cy="138.8" r="4.2" fill="#e08a00"/>
+    <circle cx="143.6" cy="147.5" r="4.2" fill="#e08a00"/>
+    <circle cx="133.6" cy="152.4" r="4.2" fill="#e08a00"/>
+    <circle cx="122.4" cy="152.4" r="4.2" fill="#e08a00"/>
+    <circle cx="112.4" cy="147.5" r="4.2" fill="#e08a00"/>
+    <circle cx="105.5" cy="138.8" r="4.2" fill="#e08a00"/>
+    <circle cx="103.0" cy="128.0" r="4.2" fill="#e08a00"/>
+    <circle cx="105.5" cy="117.2" r="4.2" fill="#e08a00"/>
+    <circle cx="112.4" cy="108.5" r="4.2" fill="#e08a00"/>
+    <circle cx="122.4" cy="103.6" r="4.2" fill="#e08a00"/>
+    <circle cx="133.6" cy="103.6" r="4.2" fill="#e08a00"/>
+    <circle cx="143.6" cy="108.5" r="4.2" fill="#e08a00"/>
+    <circle cx="150.5" cy="117.2" r="4.2" fill="#e08a00"/>
+  <circle cx="128" cy="128" r="18" fill="url(#heart)"/>
+</svg>

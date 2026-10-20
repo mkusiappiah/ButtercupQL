@@ -42,10 +42,10 @@ impl FileLoader {
     pub fn new(root: impl Into<PathBuf>) -> FileLoader {
         FileLoader { root: root.into() }
     }
-}
 
-impl Loader for FileLoader {
-    fn load(&self, module: &ModuleName<'_>, importer: &str) -> Result<SourceText, String> {
+    /// The file a module is read from, without reading it. An editor uses it to read the text of a file being
+    /// edited rather than the one saved.
+    pub fn path(&self, module: &ModuleName<'_>, importer: &str) -> Result<PathBuf, String> {
         let Some((last, folders)) = module.parts.split_last() else {
             return Err("the import names no module".to_string());
         };
@@ -65,7 +65,13 @@ impl Loader for FileLoader {
             path.push(folder);
         }
         path.push(format!("{last}.bcql"));
-        let path = tidy(&path);
+        Ok(tidy(&path))
+    }
+}
+
+impl Loader for FileLoader {
+    fn load(&self, module: &ModuleName<'_>, importer: &str) -> Result<SourceText, String> {
+        let path = self.path(module, importer)?;
         let text = std::fs::read_to_string(&path)
             .map_err(|error| format!("can't read {}: {error}", path.display()))?;
         Ok(SourceText {

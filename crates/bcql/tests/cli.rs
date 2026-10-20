@@ -267,3 +267,79 @@ fn compile_reads_modules_and_leaves_a_defs_arguments_open() {
         text(&out.stderr)
     );
 }
+
+/// A message as the language server protocol frames it.
+fn framed(message: &str) -> String {
+    format!("Content-Length: {}\r\n\r\n{message}", message.len())
+}
+
+/// The messages in what the language server wrote.
+fn messages(output: &[u8]) -> Vec<String> {
+    let output = String::from_utf8(output.to_vec()).expect("the server writes UTF-8");
+    let mut rest = output.as_str();
+    let mut found = Vec::new();
+    while let Some(start) = rest.find("\r\n\r\n") {
+        let length: usize = rest[..start]
+            .trim()
+            .strip_prefix("Content-Length: ")
+            .expect("each message starts with its length")
+            .parse()
+            .expect("the length is a number");
+        let body = &rest[start + 4..start + 4 + length];
+        found.push(body.to_string());
+        rest = &rest[start + 4 + length..];
+    }
+    assert!(
+        rest.is_empty(),
+        "the output ends inside a message: {rest:?}"
+    );
+    found
+}
+
+#[test]
+fn the_language_server_speaks_to_an_editor() {
+    let session = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{},"initializationOptions":{"dialect":"sqlite"}}}"#,
+        r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#,
+        r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///work/open.bcql","languageId":"buttercupql","version":1,"text":"from cases\nwhere status = \"open\"\n"}}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"buttercupql/compile","params":{"textDocument":{"uri":"file:///work/open.bcql"}}}"#,
+        r#"{"jsonrpc":"2.0","id":3,"method":"shutdown"}"#,
+        r#"{"jsonrpc":"2.0","method":"exit"}"#,
+    ]
+    .map(framed)
+    .concat();
+    let out = bcql(&["lsp", "--stdio"], &session);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let replies = messages(&out.stdout);
+    assert_eq!(replies.len(), 4, "{replies:#?}");
+    assert!(
+        replies[0].starts_with(r#"{"jsonrpc":"2.0","id":1,"result":{"capabilities":"#),
+        "{}",
+        replies[0]
+    );
+    assert!(
+        replies[1].starts_with(r#"{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{"uri":"file:///work/open.bcql","diagnostics":[{"range":{"start":{"line":1,"character":13},"end":{"line":1,"character":14}},"severity":1,"source":"bcql","message":"use `==` to compare"#),
+        "{}",
+        replies[1]
+    );
+    assert!(
+        replies[2].contains(r#""dialect":"sqlite","problems":["error: use `==` to compare"#),
+        "{}",
+        replies[2]
+    );
+    assert_eq!(replies[3], r#"{"jsonrpc":"2.0","id":3,"result":null}"#);
+}
+
+#[test]
+fn the_language_server_stops_with_its_input() {
+    // An editor that goes away without shutting the server down: it stops, with an exit code saying so.
+    let out = bcql(&["lsp"], "");
+    assert_eq!(out.status.code(), Some(1));
+    let out = bcql(&["lsp", "--port", "9"], "");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        text(&out.stderr).starts_with("bcql: `bcql lsp` takes no `--port`"),
+        "{}",
+        text(&out.stderr)
+    );
+}

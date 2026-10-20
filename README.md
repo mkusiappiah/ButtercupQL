@@ -127,6 +127,7 @@ bcql compile query.bcql                        # PostgreSQL, with $1 placeholder
 bcql compile query.bcql --dialect clickhouse   # also sqlite and duckdb
 bcql compile query.bcql --query for_operator   # a query def, its arguments left open
 bcql check --schema schema.sql *.bcql          # names checked against the tables
+bcql lsp                                       # the language server, for editors
 ```
 
 or, in a copy of this repository, `cargo run -p bcql -- compile examples/open_critical.bcql`.
@@ -153,6 +154,18 @@ error: there is no step `limit`
 
 checked 1 file: 2 errors
 ```
+
+## In your editor
+
+`bcql lsp` is a language server: an editor that speaks the Language Server Protocol shows each problem as it is
+typed, completes steps, functions, tables, columns and links, describes each when the pointer rests on it, and goes to
+where a name is defined, in an imported module too.
+
+- **VS Code:** the extension in [editors/vscode](editors/vscode) adds colours and **Show SQL**, the SQL of the query
+  beside the file, kept up to date as you type. Build it with `npm ci && npx vsce package` in that folder and install
+  the `.vsix` with `code --install-extension`.
+- **Other editors:** run `bcql lsp` for `.bcql` files. It takes the settings `{"dialect": "sqlite", "schema":
+  "schema.sql"}`, when it starts or when they change.
 
 ## Using it from Python
 

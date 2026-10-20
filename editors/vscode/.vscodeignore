@@ -1,0 +1,6 @@
+# Only the bundle, the grammar and the files the gallery shows go in the package.
+node_modules/**
+src/**
+test/**
+.gitignore
+*.vsix

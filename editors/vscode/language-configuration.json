@@ -1,0 +1,42 @@
+{
+  "comments": {
+    "lineComment": "#"
+  },
+  "brackets": [
+    ["{", "}"],
+    ["[", "]"],
+    ["(", ")"]
+  ],
+  "autoClosingPairs": [
+    { "open": "{", "close": "}" },
+    { "open": "[", "close": "]" },
+    { "open": "(", "close": ")" },
+    { "open": "\"", "close": "\"", "notIn": ["string", "comment"] },
+    { "open": "'", "close": "'", "notIn": ["string", "comment"] },
+    { "open": "`", "close": "`", "notIn": ["string", "comment"] },
+    { "open": "f\"", "close": "\"", "notIn": ["string", "comment"] },
+    { "open": "\"\"\"", "close": "\"\"\"", "notIn": ["string"] }
+  ],
+  "surroundingPairs": [
+    ["{", "}"],
+    ["[", "]"],
+    ["(", ")"],
+    ["\"", "\""],
+    ["'", "'"],
+    ["`", "`"]
+  ],
+  "folding": {
+    "offSide": true
+  },
+  "wordPattern": "[\\p{L}_][\\p{L}\\p{N}_]*|\\d[\\d_]*(?:\\.\\d[\\d_]*)?",
+  "indentationRules": {
+    "increaseIndentPattern": "^\\s*.*:\\s*(#.*)?$",
+    "decreaseIndentPattern": "^\\s*pass\\b"
+  },
+  "onEnterRules": [
+    {
+      "beforeText": ":\\s*(#.*)?$",
+      "action": { "indent": "indent" }
+    }
+  ]
+}

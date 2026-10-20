@@ -1,0 +1,137 @@
+{
+  "name": "buttercupql",
+  "displayName": "ButtercupQL",
+  "description": "ButtercupQL, a Python-like language for SQL: problems shown as you type, names completed and described, and the SQL each query compiles to.",
+  "version": "0.1.0",
+  "publisher": "mkusiappiah",
+  "author": {
+    "name": "Michael Kusi-Appiah"
+  },
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mkusiappiah/ButtercupQL"
+  },
+  "homepage": "https://mkusiappiah.github.io/ButtercupQL/",
+  "bugs": {
+    "url": "https://github.com/mkusiappiah/ButtercupQL/issues"
+  },
+  "icon": "icon.png",
+  "galleryBanner": {
+    "color": "#17402f",
+    "theme": "dark"
+  },
+  "engines": {
+    "vscode": "^1.91.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters"
+  ],
+  "keywords": [
+    "sql",
+    "query language",
+    "sqlite",
+    "postgresql",
+    "duckdb",
+    "clickhouse"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "buttercupql",
+        "aliases": [
+          "ButtercupQL",
+          "bcql"
+        ],
+        "extensions": [
+          ".bcql"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "buttercupql",
+        "scopeName": "source.buttercupql",
+        "path": "./syntaxes/buttercupql.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "ButtercupQL",
+      "properties": {
+        "buttercupql.dialect": {
+          "type": "string",
+          "enum": [
+            "postgres",
+            "sqlite",
+            "duckdb",
+            "clickhouse"
+          ],
+          "enumDescriptions": [
+            "PostgreSQL",
+            "SQLite",
+            "DuckDB",
+            "ClickHouse"
+          ],
+          "default": "postgres",
+          "description": "The database the queries are for."
+        },
+        "buttercupql.schema": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "A file of the database's `CREATE TABLE` statements. Names are checked against it and completed from it. A relative path is read from the workspace's folder."
+        },
+        "buttercupql.server.path": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "The `bcql` command that runs the language server. Left empty, the one that comes with the extension is used, or else `bcql` on the `PATH`."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "buttercupql.showSql",
+        "title": "Show SQL",
+        "category": "ButtercupQL",
+        "icon": "$(database)"
+      },
+      {
+        "command": "buttercupql.restartServer",
+        "title": "Restart the Language Server",
+        "category": "ButtercupQL"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "buttercupql.showSql",
+          "when": "editorLangId == buttercupql",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "buttercupql.showSql",
+          "when": "editorLangId == buttercupql"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "bundle": "esbuild src/extension.js --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --target=node20 --minify",
+    "vscode:prepublish": "npm run bundle",
+    "test": "node --check src/extension.js && node test/grammar.test.js && node test/extension.test.js",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^10.1.2"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^4.0.0",
+    "esbuild": "^0.28.2",
+    "vscode-oniguruma": "^2.0.1",
+    "vscode-textmate": "^9.2.0"
+  }
+}

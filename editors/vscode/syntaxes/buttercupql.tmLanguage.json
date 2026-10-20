@@ -1,0 +1,239 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "ButtercupQL",
+  "scopeName": "source.buttercupql",
+  "fileTypes": ["bcql"],
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#import" },
+    { "include": "#def" },
+    { "include": "#steps" },
+    { "include": "#expression" }
+  ],
+  "repository": {
+    "comment": {
+      "match": "(#).*$",
+      "name": "comment.line.number-sign.buttercupql",
+      "captures": { "1": { "name": "punctuation.definition.comment.buttercupql" } }
+    },
+    "import": {
+      "patterns": [
+        {
+          "match": "^\\s*(from)\\s+(\\.*[\\p{L}_][\\p{L}\\p{N}_.]*|\\.+)\\s+(import)\\b",
+          "captures": {
+            "1": { "name": "keyword.control.import.buttercupql" },
+            "2": { "name": "entity.name.namespace.buttercupql" },
+            "3": { "name": "keyword.control.import.buttercupql" }
+          }
+        },
+        {
+          "match": "^\\s*(import)\\b",
+          "captures": { "1": { "name": "keyword.control.import.buttercupql" } }
+        },
+        {
+          "match": "\\b(as)\\b",
+          "name": "keyword.control.import.buttercupql"
+        }
+      ]
+    },
+    "def": {
+      "match": "^\\s*(def)\\s+([\\p{L}_][\\p{L}\\p{N}_]*)",
+      "captures": {
+        "1": { "name": "storage.type.function.buttercupql" },
+        "2": { "name": "entity.name.function.buttercupql" }
+      }
+    },
+    "steps": {
+      "patterns": [
+        {
+          "match": "(?:^|;)\\s*(group)\\s+(by)\\b",
+          "captures": {
+            "1": { "name": "keyword.control.step.buttercupql" },
+            "2": { "name": "keyword.control.step.buttercupql" }
+          }
+        },
+        {
+          "match": "(?:^|;)\\s*(?:(left)\\s+)?(join)\\b",
+          "captures": {
+            "1": { "name": "keyword.control.step.buttercupql" },
+            "2": { "name": "keyword.control.step.buttercupql" }
+          }
+        },
+        {
+          "match": "(?:^|;)\\s*(from|where|select|del|sort|take|skip|distinct|summarize|pass)\\b(?!\\s*(?:[-+*/%=<>!]?=|\\.|\\())",
+          "captures": { "1": { "name": "keyword.control.step.buttercupql" } }
+        },
+        {
+          "match": "\\b(on)\\b",
+          "name": "keyword.control.step.buttercupql"
+        }
+      ]
+    },
+    "expression": {
+      "patterns": [
+        { "include": "#comment" },
+        { "include": "#string" },
+        { "include": "#quoted-name" },
+        { "include": "#number" },
+        { "include": "#constant" },
+        { "include": "#operator-word" },
+        { "include": "#call" },
+        { "include": "#operator" },
+        { "include": "#brackets" },
+        { "include": "#attribute" },
+        { "include": "#name" }
+      ]
+    },
+    "string": {
+      "patterns": [
+        {
+          "begin": "(\"\"\"|''')",
+          "end": "(\\1)",
+          "name": "string.quoted.docstring.multi.buttercupql",
+          "beginCaptures": { "1": { "name": "punctuation.definition.string.begin.buttercupql" } },
+          "endCaptures": { "1": { "name": "punctuation.definition.string.end.buttercupql" } },
+          "patterns": [{ "include": "#escape" }]
+        },
+        {
+          "begin": "([fF])(\"|')",
+          "end": "(\\2)|((?<!\\\\)\\n)",
+          "name": "string.interpolated.buttercupql",
+          "beginCaptures": {
+            "1": { "name": "storage.type.string.buttercupql" },
+            "2": { "name": "punctuation.definition.string.begin.buttercupql" }
+          },
+          "endCaptures": {
+            "1": { "name": "punctuation.definition.string.end.buttercupql" },
+            "2": { "name": "invalid.illegal.newline.buttercupql" }
+          },
+          "patterns": [
+            { "include": "#escape" },
+            { "match": "\\{\\{|\\}\\}", "name": "constant.character.escape.buttercupql" },
+            {
+              "begin": "\\{",
+              "end": "\\}",
+              "name": "meta.interpolation.buttercupql",
+              "beginCaptures": { "0": { "name": "punctuation.section.interpolation.begin.buttercupql" } },
+              "endCaptures": { "0": { "name": "punctuation.section.interpolation.end.buttercupql" } },
+              "contentName": "source.buttercupql",
+              "patterns": [{ "include": "#expression" }]
+            }
+          ]
+        },
+        {
+          "begin": "\"",
+          "end": "(\")|((?<!\\\\)\\n)",
+          "name": "string.quoted.double.buttercupql",
+          "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.buttercupql" } },
+          "endCaptures": {
+            "1": { "name": "punctuation.definition.string.end.buttercupql" },
+            "2": { "name": "invalid.illegal.newline.buttercupql" }
+          },
+          "patterns": [{ "include": "#escape" }]
+        },
+        {
+          "begin": "'",
+          "end": "(')|((?<!\\\\)\\n)",
+          "name": "string.quoted.single.buttercupql",
+          "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.buttercupql" } },
+          "endCaptures": {
+            "1": { "name": "punctuation.definition.string.end.buttercupql" },
+            "2": { "name": "invalid.illegal.newline.buttercupql" }
+          },
+          "patterns": [{ "include": "#escape" }]
+        }
+      ]
+    },
+    "escape": {
+      "match": "\\\\(?:[\\\\'\"abfnrtv0]|x\\h{2}|u\\h{4}|U\\h{8}|N\\{[^}]+\\}|\\n)",
+      "name": "constant.character.escape.buttercupql"
+    },
+    "quoted-name": {
+      "match": "(`)[^`\\n]*(`)",
+      "name": "variable.other.quoted.buttercupql",
+      "captures": {
+        "1": { "name": "punctuation.definition.variable.begin.buttercupql" },
+        "2": { "name": "punctuation.definition.variable.end.buttercupql" }
+      }
+    },
+    "number": {
+      "match": "(?<![\\p{L}\\p{N}_.])(?:\\d(?:_?\\d)*)?\\.?\\d(?:_?\\d)*(?:[eE][+-]?\\d(?:_?\\d)*)?\\b",
+      "name": "constant.numeric.buttercupql"
+    },
+    "constant": {
+      "match": "\\b(True|False|None)\\b",
+      "name": "constant.language.buttercupql"
+    },
+    "operator-word": {
+      "match": "\\b(and|or|not|in|is|if|else)\\b",
+      "name": "keyword.operator.logical.buttercupql"
+    },
+    "call": {
+      "begin": "(?:\\b(count|count_distinct|sum|mean|avg|min|max|any|all|row_number|rank|dense_rank|lag|lead|first|last|len|abs|round|str|int|float|now|today|date|datetime|days|hours|minutes|seconds|weeks|literal)|([\\p{L}_][\\p{L}\\p{N}_]*))\\s*(\\()",
+      "end": "\\)",
+      "beginCaptures": {
+        "1": { "name": "support.function.builtin.buttercupql" },
+        "2": { "name": "entity.name.function.call.buttercupql" },
+        "3": { "name": "punctuation.definition.arguments.begin.buttercupql" }
+      },
+      "endCaptures": { "0": { "name": "punctuation.definition.arguments.end.buttercupql" } },
+      "name": "meta.function-call.buttercupql",
+      "patterns": [
+        {
+          "match": "\\b([\\p{L}_][\\p{L}\\p{N}_]*)\\s*(=)(?!=)",
+          "captures": {
+            "1": { "name": "variable.parameter.function-call.buttercupql" },
+            "2": { "name": "keyword.operator.assignment.buttercupql" }
+          }
+        },
+        { "include": "#expression" }
+      ]
+    },
+    "operator": {
+      "patterns": [
+        { "match": "==|!=|<=|>=|<|>", "name": "keyword.operator.comparison.buttercupql" },
+        { "match": "\\*\\*|//|[-+*/%]", "name": "keyword.operator.arithmetic.buttercupql" },
+        { "match": "[-+*/%]?=", "name": "keyword.operator.assignment.buttercupql" },
+        { "match": ":", "name": "punctuation.separator.colon.buttercupql" },
+        { "match": ",", "name": "punctuation.separator.element.buttercupql" },
+        { "match": ";", "name": "punctuation.terminator.step.buttercupql" }
+      ]
+    },
+    "brackets": {
+      "patterns": [
+        {
+          "begin": "\\(",
+          "end": "\\)",
+          "beginCaptures": { "0": { "name": "punctuation.parenthesis.begin.buttercupql" } },
+          "endCaptures": { "0": { "name": "punctuation.parenthesis.end.buttercupql" } },
+          "patterns": [{ "include": "#steps" }, { "include": "#expression" }]
+        },
+        {
+          "begin": "\\[",
+          "end": "\\]",
+          "beginCaptures": { "0": { "name": "punctuation.definition.list.begin.buttercupql" } },
+          "endCaptures": { "0": { "name": "punctuation.definition.list.end.buttercupql" } },
+          "patterns": [{ "include": "#expression" }]
+        },
+        {
+          "begin": "\\{",
+          "end": "\\}",
+          "beginCaptures": { "0": { "name": "punctuation.definition.set.begin.buttercupql" } },
+          "endCaptures": { "0": { "name": "punctuation.definition.set.end.buttercupql" } },
+          "patterns": [{ "include": "#expression" }]
+        }
+      ]
+    },
+    "attribute": {
+      "match": "(\\.)\\s*([\\p{L}_][\\p{L}\\p{N}_]*)",
+      "captures": {
+        "1": { "name": "punctuation.separator.period.buttercupql" },
+        "2": { "name": "variable.other.member.buttercupql" }
+      }
+    },
+    "name": {
+      "match": "\\b[\\p{L}_][\\p{L}\\p{N}_]*\\b",
+      "name": "variable.other.buttercupql"
+    }
+  }
+}

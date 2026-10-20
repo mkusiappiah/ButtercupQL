@@ -37,6 +37,7 @@
 //! ```
 
 pub mod ast;
+pub mod builtins;
 mod compile;
 mod diagnostic;
 mod dialect;

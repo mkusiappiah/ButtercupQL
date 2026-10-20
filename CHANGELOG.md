@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- `bcql lsp`, a language server. It shows each problem as it is typed, a problem in an imported module on the import
+  that reads it; completes steps, functions, methods, the file's own definitions and, with a schema, tables, columns
+  and links; describes them on hover; goes to a definition, in another module too; lists a file's definitions; and
+  gives the SQL of a query for an editor to show. Places are counted in UTF-16, or in UTF-8 when the editor asks.
+- The VS Code extension, in `editors/vscode`: colours, the language server, and **Show SQL** beside the file.
+- `bcql check` also compiles a file's named queries and query `def`s, so a file of definitions is checked as fully
+  as a query.
+- `buttercupql::builtins`, which describes every step, function, method and part of a date, and `FileLoader::path`.
 - The Python package, `buttercupql`: `compile()` and `check()`, with every problem found raised as one `CompileError`;
   schemas as `CREATE TABLE` text, a dict or a `Schema`; a query `def`'s arguments given with `bind()`; modules from
   files or from texts; and the `bcql` command. One wheel serves every Python from 3.9.

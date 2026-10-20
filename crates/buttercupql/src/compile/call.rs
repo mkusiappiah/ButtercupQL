@@ -4,7 +4,7 @@ use super::*;
 use crate::sql::Frame;
 
 /// The functions ButtercupQL knows, for suggestions.
-const FUNCTIONS: [&str; 32] = [
+pub(crate) const FUNCTIONS: [&str; 32] = [
     "count",
     "count_distinct",
     "sum",

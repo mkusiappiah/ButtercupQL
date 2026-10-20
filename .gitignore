@@ -8,3 +8,6 @@ __pycache__/
 # The compiled module that `maturin develop` puts beside the Python source.
 /crates/python/python/buttercupql/*.so
 /crates/python/python/buttercupql/*.pyd
+/editors/vscode/node_modules/
+/editors/vscode/bin/
+*.vsix
