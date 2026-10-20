@@ -1,7 +1,7 @@
-# ButtercupQL language design — v0.1 draft
+# ButtercupQL language design — v0.1
 
-**Status:** draft for approval, 20 October 2026. The compiler is built from this document once it is approved; until then
-everything here can change. The research behind each choice is in [research.md](research.md).
+**Status:** approved on 20 October 2026. The parser reads every form in this document, and the compiler is being built
+from it. The research behind each choice is in [research.md](research.md).
 
 ## Goals
 
@@ -205,12 +205,36 @@ Every error found is reported at once, each pointing at its place, rather than o
   where a partial index needs to see it.
 - **Compiling takes microseconds,** so it can run on every request, and in a browser through WebAssembly.
 
+## Writing details
+
+Settled while building the parser, each as Python does it where Python has an answer:
+
+- **Lines.** A step ends at the end of its line. Inside brackets a step can run over several lines, and a `\` at the end
+  of a line joins the next one to it. `;` puts several steps on one line: `from cases; where risk > 90; take 5`.
+- **Indentation.** The first line sets the column, so a query indented inside a Python string reads as it is. Only a
+  block after a `:` is indented further. Tabs and spaces mixed so that the meaning depends on a tab's width are refused,
+  as in Python.
+- **Names that are not plain words** go in backticks: ``from `order lines` ``, ``where `from` == "A"``. Python's
+  keywords need them too. The step words (`where`, `sort` and the others) are ordinary names everywhere except at the
+  start of a line.
+- **Long lists of columns** go in brackets, over as many lines as needed: `select (key, risk, total = x + y)`.
+- **`group by operator`** with no block keeps one row per group, with no totals.
+- **Values before the query.** `threshold = 1_000_000` names a value for the query to use, as a named query names a
+  query. In the query, the name means the value even where a table has a column of the same name, so a new column can
+  never change what a query does.
+- **`risk += 1`** is `risk = risk + 1`, as in Python.
+- **A query in brackets is a value:** `where account_id in (from blocked; select account_id)`.
+- **Other languages' habits are caught.** `order by`, `limit`, `having`, `WHERE`, `=` in a condition, `&&`, `||`, `!`,
+  `<>`, `desc` and `x as y` are each reported with the ButtercupQL way to write them.
+
 ## Not in v0.1
 
 - Writing data (`insert`, `update`, `delete`) and creating tables.
 - Window functions, links, `match`, recursive queries and pivots: planned for v0.2 and later.
 
-## Decisions for approval
+## Decisions
+
+Approved on 20 October 2026:
 
 1. `sort -risk` as the main form, with `reverse=True` accepted.
 2. `mean(x)` for averages, with `avg(x)` accepted.

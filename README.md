@@ -52,15 +52,47 @@ where money > 1_000_000
 sort -money
 ```
 
+## Try it
+
+With [Rust](https://rustup.rs) installed:
+
+```sh
+cargo install --git https://github.com/mkusiappiah/ButtercupQL bcql
+bcql check query.bcql
+```
+
+or, in a copy of this repository, `cargo run -p bcql -- check examples/*.bcql`.
+
+`bcql check` reports every mistake in a file in one go, each under its line, and says how to write it the ButtercupQL
+way:
+
+```text
+error: use `==` to compare
+  ┌─ query.bcql:3:14
+  │
+3 │ where status = "open"
+  │              ^ `=` gives a column a value; `==` compares two values
+
+error: there is no step `limit`
+  ┌─ query.bcql:5:1
+  │
+5 │ limit 20
+  │ ^^^^^ ButtercupQL calls this `take`
+  = help: for example: `take 20`
+
+checked 1 file: 2 errors
+```
+
 ## Status
 
-ButtercupQL is being designed. The language is described in [docs/design.md](docs/design.md) (v0.1 draft) and the
-research behind it in [docs/research.md](docs/research.md). The compiler is built next.
+The language design is approved: [docs/design.md](docs/design.md) describes it, and
+[docs/research.md](docs/research.md) the research behind it. The parser is built: it reads every form in the design,
+and `bcql check` shows the mistakes it finds. The compiler, which writes the SQL, is built next.
 
 ## Roadmap
 
-1. **Language design** (v0.1 draft, in review)
-2. **Core:** tokens, the parser, error messages and `bcql check`
+1. **Language design** (approved 20 October 2026)
+2. **Core:** tokens, the parser, error messages and `bcql check` (done)
 3. **Compiler:** filtering, sorting, selecting, grouping and joins, compiling to SQLite and PostgreSQL, tested against
    real databases
 4. **More:** `def`, imports, window functions and links; DuckDB and ClickHouse
@@ -68,7 +100,8 @@ research behind it in [docs/research.md](docs/research.md). The compiler is buil
 
 ## Building
 
-ButtercupQL is written in Rust (edition 2024).
+ButtercupQL is written in Rust (edition 2024), with no dependencies. The workspace holds two crates:
+[`buttercupql`](crates/buttercupql), the library, and [`bcql`](crates/bcql), the command.
 
 ```sh
 cargo test --workspace

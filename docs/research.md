@@ -42,13 +42,17 @@ totals is about a quarter shorter (194 for SQL, 149 for ButtercupQL); a simple f
    the values, then may switch to a generic plan, and a generic plan cannot use a partial index whose condition names a
    value [13]. ButtercupQL makes values parameters by default, and `literal(x)` writes a value into the SQL where a
    partial index needs it.
-4. **A fast compiler.** Written in Rust, compiling takes microseconds, so it can run on every request.
+4. **A fast compiler.** Written in Rust, compiling takes microseconds, so it can run on every request. Reading the
+   examples into their syntax trees takes 1.6 to 4 microseconds each (measured on an Apple Silicon Mac, optimised
+   build, 200,000 runs of each).
 
 ## Better than SQL
 
 1. **Missing values.** `col = NULL` is never true in SQL, and `NOT IN` against a list containing `NULL` returns no rows,
    both silently [14]. ButtercupQL compiles `== None` and `is None` to `IS NULL`, and guards `not in`.
-2. **Errors with places and suggestions,** every error at once, with the parser recovering after each [15].
+2. **Errors with places and suggestions,** every error at once, with the parser recovering after each [15][22]. A
+   message also names the ButtercupQL way when a line is written as SQL or pandas would write it: `order by` points to
+   `sort`, `limit` to `take`, `=` in a condition to `==`, `&` to `and`.
 3. **Composition:** named queries, `def` and imports [10].
 4. **Safety:** values are always parameters, never pasted into the SQL.
 
@@ -57,8 +61,8 @@ totals is about a quarter shorter (194 for SQL, 149 for ButtercupQL); a simple f
 | Part | Choice | Why |
 |---|---|---|
 | Language | Rust | Memory safety when reading untrusted text, at the speed of C, with Cargo's tooling [16] |
-| Parser | `logos` tokens and `chumsky` parsing | `chumsky` keeps going after an error and returns every error with a partial tree [15] |
-| Error messages | `ariadne` | Clear messages pointing at the source [15] |
+| Parser | Written by hand, with no libraries | A step is one line, so after a mistake the parser starts again at the next step and reports every mistake in one reading. Ruff moved to a hand-written parser for the same reasons: more than twice as fast as the generated one it replaced, with room for error recovery and clearer messages [22]. The `chumsky` library [15] was the first plan; writing the parser by hand gives the same recovery with no dependencies |
+| Error messages | ButtercupQL's own | The same messages in the terminal, the Python package and the browser, with no library to keep up to date |
 | Python package | PyO3 and maturin | Wheels for Python 3.8+ on Windows, Linux and macOS, published to PyPI [17][18] |
 | Browser playground | `wasm-bindgen` | Rust compiled to WebAssembly with JavaScript bindings [19] |
 | Editor support | `tower-lsp` | A Language Server Protocol server for VS Code and other editors [20] |
@@ -93,3 +97,4 @@ totals is about a quarter shorter (194 for SQL, 149 for ButtercupQL); a simple f
 19. [Rust to WebAssembly with wasm-bindgen](https://matthewmacfarquhar.medium.com/programming-webassembly-with-rust-part-3-targeting-js-with-wasm-bindgen-d0ee3c28d18a)
 20. [tower-lsp](https://github.com/ebkalderon/tower-lsp)
 21. [Buttercup password manager](https://github.com/buttercup)
+22. [Ruff v0.4.0: a hand-written recursive descent parser for Python](https://astral.sh/blog/ruff-v0.4.0)

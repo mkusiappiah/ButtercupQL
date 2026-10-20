@@ -3,5 +3,12 @@
 version = 4
 
 [[package]]
+name = "bcql"
+version = "0.0.1"
+dependencies = [
+ "buttercupql",
+]
+
+[[package]]
 name = "buttercupql"
 version = "0.0.1"

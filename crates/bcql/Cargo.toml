@@ -1,0 +1,16 @@
+[package]
+name = "bcql"
+description = "The ButtercupQL command: check ButtercupQL queries, and compile them to SQL."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["sql", "query-language", "cli", "compiler", "database"]
+categories = ["command-line-utilities", "database", "compilers"]
+
+[dependencies]
+buttercupql = { path = "../buttercupql", version = "0.0.1" }

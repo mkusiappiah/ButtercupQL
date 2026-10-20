@@ -1,108 +1,85 @@
 //! ButtercupQL, a Python-like language for SQL, named after the buttercup flower.
 //!
-//! A query is written one step per line, in the order the data flows, and compiles to the SQL a
-//! database already runs, with every value passed as a parameter. The language is described in
-//! `docs/design.md`; the compiler is built from it once the design is approved.
+//! A query is written one step per line, in the order the data flows, and compiles to the SQL a database already
+//! runs, with every value passed as a parameter. The language is described in `docs/design.md`.
+//!
+//! ```
+//! let parsed = buttercupql::parse(
+//!     r#"
+//!     from cases
+//!     where status == "open" and risk >= 90
+//!     sort -risk
+//!     take 20
+//!     "#,
+//! );
+//! assert!(parsed.diagnostics.is_empty());
+//! assert_eq!(parsed.file.query.unwrap().steps.len(), 4);
+//! ```
+//!
+//! Every problem in a text is found in one reading, each with its place, and shown as a person reads it:
+//!
+//! ```
+//! use buttercupql::SourceFile;
+//!
+//! let text = "from cases\nwhere status = \"open\"\n";
+//! let parsed = buttercupql::parse(text);
+//! let shown = parsed.diagnostics[0].render(&SourceFile::new("open.bcql", text), false);
+//! assert_eq!(
+//!     shown,
+//!     "\
+//! error: use `==` to compare
+//!   ┌─ open.bcql:2:14
+//!   │
+//! 2 │ where status = \"open\"
+//!   │              ^ `=` gives a column a value; `==` compares two values
+//! "
+//! );
+//! ```
 
-use std::fmt;
-use std::str::FromStr;
+pub mod ast;
+mod diagnostic;
+mod dialect;
+mod lexer;
+mod parser;
+mod span;
+mod suggest;
+
+pub use diagnostic::{Diagnostic, Label, Severity, SourceFile};
+pub use dialect::{Dialect, UnknownDialect};
+pub use span::Span;
 
 /// The version of this crate.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// The databases ButtercupQL compiles to, in the order they are being built.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Dialect {
-    /// SQLite.
-    Sqlite,
-    /// PostgreSQL.
-    Postgres,
-    /// DuckDB.
-    DuckDb,
-    /// ClickHouse.
-    ClickHouse,
+/// A ButtercupQL text read into its syntax tree, with every problem found in it.
+#[derive(Debug, Clone)]
+pub struct Parsed {
+    /// The syntax tree. When the text has mistakes, it holds every part that could be read.
+    pub file: ast::File,
+    /// The problems found, in the order of the text.
+    pub diagnostics: Vec<Diagnostic>,
 }
 
-impl Dialect {
-    /// Every dialect, in the order they are being built.
-    pub const ALL: [Dialect; 4] = [
-        Dialect::Sqlite,
-        Dialect::Postgres,
-        Dialect::DuckDb,
-        Dialect::ClickHouse,
-    ];
-
-    /// The dialect's name, as the command line and the Python package take it.
-    pub fn name(self) -> &'static str {
-        match self {
-            Dialect::Sqlite => "sqlite",
-            Dialect::Postgres => "postgres",
-            Dialect::DuckDb => "duckdb",
-            Dialect::ClickHouse => "clickhouse",
-        }
+impl Parsed {
+    /// Whether any of the problems is an error.
+    pub fn has_errors(&self) -> bool {
+        self.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == Severity::Error)
     }
 }
 
-impl fmt::Display for Dialect {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
+/// Reads a ButtercupQL text into its syntax tree, finding every problem in it.
+pub fn parse(text: &str) -> Parsed {
+    if u32::try_from(text.len()).is_err() {
+        return Parsed {
+            file: ast::File::default(),
+            diagnostics: vec![Diagnostic::error(
+                Span::default(),
+                "the text is too long: ButtercupQL reads texts of up to 4 GiB",
+            )],
+        };
     }
-}
-
-/// A dialect name that ButtercupQL does not know.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnknownDialect(pub String);
-
-impl fmt::Display for UnknownDialect {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "unknown dialect `{}`: use sqlite, postgres, duckdb or clickhouse",
-            self.0
-        )
-    }
-}
-
-impl std::error::Error for UnknownDialect {}
-
-impl FromStr for Dialect {
-    type Err = UnknownDialect;
-
-    fn from_str(text: &str) -> Result<Self, Self::Err> {
-        match text.trim().to_ascii_lowercase().as_str() {
-            "sqlite" => Ok(Dialect::Sqlite),
-            "postgres" | "postgresql" => Ok(Dialect::Postgres),
-            "duckdb" => Ok(Dialect::DuckDb),
-            "clickhouse" => Ok(Dialect::ClickHouse),
-            _ => Err(UnknownDialect(text.to_string())),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn every_dialect_reads_back_from_its_name() {
-        for dialect in Dialect::ALL {
-            assert_eq!(dialect.name().parse::<Dialect>(), Ok(dialect));
-            assert_eq!(dialect.to_string(), dialect.name());
-        }
-    }
-
-    #[test]
-    fn names_are_read_without_regard_to_case_and_postgresql_is_accepted() {
-        assert_eq!("PostgreSQL".parse::<Dialect>(), Ok(Dialect::Postgres));
-        assert_eq!(" DuckDB ".parse::<Dialect>(), Ok(Dialect::DuckDb));
-    }
-
-    #[test]
-    fn an_unknown_dialect_says_which_ones_exist() {
-        let error = "oracle".parse::<Dialect>().unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "unknown dialect `oracle`: use sqlite, postgres, duckdb or clickhouse"
-        );
-    }
+    let (file, diagnostics) = parser::parse(text);
+    Parsed { file, diagnostics }
 }
