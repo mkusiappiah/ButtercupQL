@@ -1,0 +1,161 @@
+# Grouping: totals for each group, or for every row, and pivots.
+
+=== group by gives a row for each group
+from cases
+group by status:
+    n = count()
+sort status
+--- rows
+["closed", 1]
+["open", 5]
+
+=== the totals of each group
+from cases
+group by status:
+    n = count()
+    total = sum(risk)
+    top = max(risk)
+    low = min(risk)
+sort status
+--- rows
+["closed", 1, 0, null, null]
+["open", 5, 290, 95, -5]
+
+=== count(x) counts the values that are not missing
+from cases
+summarize:
+    rows = count()
+    risks = count(risk)
+    bands = count(band)
+--- rows
+[6, 5, 5]
+
+=== count_distinct counts the different values
+from cases
+summarize:
+    bands = count_distinct(band)
+    statuses = count_distinct(status)
+--- rows
+[3, 2]
+
+=== a total with a condition of its own
+from cases
+group by account_id:
+    n = count()
+    open = count(where=status == "open")
+sort account_id
+--- rows
+["A1", 2, 2]
+["A2", 2, 1]
+["A3", 1, 1]
+[null, 1, 1]
+
+=== mean
+from payments
+summarize:
+    average = mean(amount)
+    also = avg(amount)
+--- rows
+[83, 83]
+
+=== the totals of no rows: 0 for a count and a sum, missing for the others
+from payments
+where amount > 1000
+summarize:
+    n = count()
+    total = sum(amount)
+    average = mean(amount)
+    top = max(amount)
+--- rows
+[0, 0, null, null]
+
+=== any and all
+from cases
+where risk is not None
+group by status:
+    some = any(risk > 90)
+    every = all(risk > 30)
+sort status
+--- rows
+["open", true, false]
+
+=== any of no rows is False, and all of no rows is True
+from cases
+where risk > 1000
+summarize:
+    some = any(risk > 0)
+    every = all(risk > 0)
+--- rows
+[false, true]
+
+=== group by a value made from the columns
+from cases
+group by tens = risk // 10:
+    n = count()
+sort tens
+--- rows
+[-1, 1]
+[4, 1]
+[7, 1]
+[9, 2]
+[null, 1]
+
+=== a where after a group by is on the groups
+from cases
+group by account_id:
+    n = count()
+where n > 1
+sort account_id
+select account_id
+--- rows
+["A1"]
+["A2"]
+
+=== a grouped query is grouped again
+from cases
+group by account_id:
+    n = count()
+where n > 1
+summarize:
+    accounts = count()
+--- rows
+[2]
+
+=== group by with no block keeps a row for each group
+from cases
+group by status
+sort status
+--- rows
+["closed"]
+["open"]
+
+=== a total named as the column it totals
+from cases
+group by band:
+    risk = max(risk)
+where risk > 50
+sort band
+select band, risk
+--- rows
+["critical", 95]
+["high", 90]
+
+=== a pivot makes a column of a total for each value
+from cases
+where status == "open"
+pivot band in ["critical", "high", "low"] by account_id:
+    n = count()
+sort account_id
+--- rows
+["A1", 1, 1, 0]
+["A2", 0, 0, 1]
+["A3", 0, 0, 0]
+[null, 0, 1, 0]
+
+=== a pivot of several totals, of every row
+from cases
+pivot band in ["critical", "high"]:
+    n = count()
+    top = max(risk)
+--- rows
+[2, 95, 2, 90]

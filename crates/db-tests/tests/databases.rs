@@ -1600,6 +1600,8 @@ struct QueuedScript {
     label: String,
     statements: Vec<buttercupql::Statement>,
     rows: Vec<Vec<Cell>>,
+    /// The rows are compared in any order.
+    any_order: bool,
     checks: Vec<(&'static str, Vec<Vec<Cell>>)>,
 }
 
@@ -1668,7 +1670,7 @@ fn duckdb_scripts(python: &str, scripts: &[QueuedScript]) -> Vec<String> {
             continue;
         }
         let rows = rows_of(&result["rows"]);
-        if rows != script.rows {
+        if !same_rows(&rows, &script.rows, script.any_order) {
             failures.push(format!(
                 "{}: wrong rows\ngot:\n{}\nwanted:\n{}",
                 script.label,
@@ -1770,6 +1772,7 @@ fn every_script_changes_the_database_as_it_says() {
                         label: label.clone(),
                         statements: compiled.statements.clone(),
                         rows: case.rows.clone(),
+                        any_order: false,
                         checks: checks.clone(),
                     });
                     None
@@ -1799,6 +1802,343 @@ fn every_script_changes_the_database_as_it_says() {
                         }
                     }
                 }
+            }
+        }
+    }
+    if let Some(python) = &duckdb {
+        failures.extend(duckdb_scripts(python, &queued));
+    }
+    if let Some(clickhouse) = &clickhouse {
+        let _ = clickhouse.send(
+            &format!("DROP DATABASE IF EXISTS {}", clickhouse.database),
+            &[],
+            false,
+        );
+    }
+    report(failures);
+}
+
+// ---- The conformance suite
+
+/// Whether two lists of rows are the same, in order, or in any order.
+fn same_rows(got: &[Vec<Cell>], wanted: &[Vec<Cell>], any_order: bool) -> bool {
+    if !any_order {
+        return got == wanted;
+    }
+    // Missing values first, then numbers by their value, then text.
+    let key = |row: &Vec<Cell>| -> Vec<(u8, f64, String)> {
+        row.iter()
+            .map(|cell| match cell {
+                Cell::Null => (0, 0.0, String::new()),
+                Cell::Int(n) => (1, *n as f64, String::new()),
+                Cell::Float(x) => (1, *x, String::new()),
+                Cell::Text(text) => (2, 0.0, text.clone()),
+            })
+            .collect()
+    };
+    let sorted = |rows: &[Vec<Cell>]| {
+        let mut rows = rows.to_vec();
+        rows.sort_by(|a, b| {
+            key(a)
+                .partial_cmp(&key(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        rows
+    };
+    sorted(got) == sorted(wanted)
+}
+
+/// A case of the conformance suite, read from its file: a text, and what it must give.
+struct Conformance {
+    /// The file and the case's name.
+    label: String,
+    text: String,
+    /// The rows of the text's last statement, if the case says them.
+    rows: Option<Vec<Vec<Cell>>>,
+    any_order: bool,
+    /// The errors that refuse the text on every database: each one's line, column and message.
+    errors: Vec<(usize, usize, String)>,
+    /// The warnings it compiles with.
+    warnings: Vec<(usize, usize, String)>,
+    /// The databases that refuse it, each with the message.
+    refused: Vec<(Dialect, String)>,
+}
+
+/// Reads the cases of a file of the suite. A case starts with `=== name`, then its text, then its sections, each
+/// starting with `---`; README.md in the suite's folder describes them.
+fn conformance_file(file: &str, source: &str) -> Vec<Conformance> {
+    let mut cases = Vec::new();
+    let mut lines = source.lines().peekable();
+    while let Some(line) = lines.next() {
+        let Some(name) = line.strip_prefix("=== ") else {
+            assert!(
+                line.is_empty() || line.starts_with('#'),
+                "{file}: a line outside a case: {line:?}"
+            );
+            continue;
+        };
+        let mut case = Conformance {
+            label: format!("{file}: {name}"),
+            text: String::new(),
+            rows: None,
+            any_order: false,
+            errors: Vec::new(),
+            warnings: Vec::new(),
+            refused: Vec::new(),
+        };
+        while let Some(line) = lines.peek() {
+            if line.starts_with("---") || line.starts_with("=== ") {
+                break;
+            }
+            case.text.push_str(line);
+            case.text.push('\n');
+            lines.next();
+        }
+        // The text ends at its last line that is not blank.
+        let kept = case.text.trim_end().len();
+        case.text.truncate(kept);
+        case.text.push('\n');
+        while let Some(header) = lines.peek().copied() {
+            let Some(section) = header.strip_prefix("--- ") else {
+                break;
+            };
+            lines.next();
+            let mut body = Vec::new();
+            while let Some(line) = lines.peek() {
+                if line.starts_with("---") || line.starts_with("=== ") {
+                    break;
+                }
+                let line = lines.next().expect("a line");
+                if !line.trim().is_empty() && !line.starts_with('#') {
+                    body.push(line);
+                }
+            }
+            let placed = |line: &str| -> (usize, usize, String) {
+                let (place, message) = line
+                    .split_once(' ')
+                    .unwrap_or_else(|| panic!("{}: `line:column message`: {line:?}", case.label));
+                let (row, column) = place
+                    .split_once(':')
+                    .unwrap_or_else(|| panic!("{}: `line:column`: {place:?}", case.label));
+                (
+                    row.parse().expect("a line number"),
+                    column.parse().expect("a column number"),
+                    message.to_string(),
+                )
+            };
+            match section {
+                "rows" | "rows in any order" => {
+                    case.any_order = section == "rows in any order";
+                    let rows = body
+                        .iter()
+                        .map(|line| {
+                            let row: serde_json::Value =
+                                serde_json::from_str(line).unwrap_or_else(|error| {
+                                    panic!("{}: {line:?}: {error}", case.label)
+                                });
+                            row.as_array()
+                                .unwrap_or_else(|| {
+                                    panic!("{}: a row is a list: {line:?}", case.label)
+                                })
+                                .iter()
+                                .cloned()
+                                .map(json_cell)
+                                .collect()
+                        })
+                        .collect();
+                    case.rows = Some(rows);
+                }
+                "error" => case.errors.extend(body.iter().map(|line| placed(line))),
+                "warning" => case.warnings.extend(body.iter().map(|line| placed(line))),
+                other => {
+                    let dialects = other.strip_prefix("refused on ").unwrap_or_else(|| {
+                        panic!("{}: an unknown section `--- {other}`", case.label)
+                    });
+                    let [message] = body.as_slice() else {
+                        panic!("{}: a refusal has one message", case.label);
+                    };
+                    for dialect in dialects.split(", ") {
+                        let dialect: Dialect = dialect.parse().expect("a database's name");
+                        case.refused.push((dialect, message.to_string()));
+                    }
+                }
+            }
+        }
+        cases.push(case);
+    }
+    cases
+}
+
+/// The problems of a kind a text has, each with its place.
+fn placed_problems(
+    text: &str,
+    problems: &[buttercupql::Diagnostic],
+    severity: buttercupql::Severity,
+) -> Vec<(usize, usize, String)> {
+    let source = buttercupql::SourceFile::new("case.bcql", text);
+    problems
+        .iter()
+        .filter(|problem| problem.severity == severity)
+        .map(|problem| {
+            let (line, column) = source.location(problem.span.start);
+            (line, column, problem.message.clone())
+        })
+        .collect()
+}
+
+#[test]
+fn the_conformance_suite_holds_on_every_database() {
+    let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../conformance");
+    let read = |path: &std::path::Path| {
+        std::fs::read_to_string(path)
+            .unwrap_or_else(|error| panic!("can't read {}: {error}", path.display()))
+            .replace("\r\n", "\n")
+    };
+    let tables = read(&folder.join("tables.bcql"));
+    // Each case starts from the tables and rows of tables.bcql, compiled for its database.
+    let fixture = |dialect: Dialect| -> Vec<buttercupql::Statement> {
+        buttercupql::compile(&tables, &Options::new(dialect))
+            .unwrap_or_else(|problems| {
+                panic!("tables.bcql does not compile for {dialect}: {problems:?}")
+            })
+            .statements
+    };
+    let fixtures: Vec<(Dialect, Vec<buttercupql::Statement>)> = Dialect::ALL
+        .iter()
+        .map(|&dialect| (dialect, fixture(dialect)))
+        .collect();
+    // Its tables are the schema each case's names are checked against: as PostgreSQL's statements make them.
+    let ddl: Vec<String> = fixture(Dialect::Postgres)
+        .into_iter()
+        .filter(|statement| statement.kind == buttercupql::StatementKind::Definition)
+        .map(|statement| statement.sql)
+        .collect();
+    let schema = Schema::from_sql(&ddl.join(";\n")).expect("the suite's tables read as a schema");
+
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&folder)
+        .expect("the conformance folder can be read")
+        .map(|entry| entry.expect("an entry").path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "test")
+        })
+        .collect();
+    files.sort();
+    let mut cases = Vec::new();
+    for path in &files {
+        let name = path
+            .file_name()
+            .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+        cases.extend(conformance_file(&name, &read(path)));
+    }
+    assert!(cases.len() >= 100, "only {} cases were read", cases.len());
+
+    let mut postgres = std::env::var("BCQL_POSTGRES_URL").ok().map(|url| {
+        postgres::Client::connect(&url, postgres::NoTls).expect("PostgreSQL can be reached")
+    });
+    let clickhouse = ClickHouse::connect("conformance");
+    let duckdb = std::env::var("BCQL_DUCKDB_PYTHON").ok();
+    let mut queued = Vec::new();
+    let mut failures = Vec::new();
+    for (n, case) in cases.iter().enumerate() {
+        for (dialect, setup) in &fixtures {
+            let dialect = *dialect;
+            let label = format!("{} ({dialect})", case.label);
+            let compiled =
+                buttercupql::compile(&case.text, &Options::new(dialect).with_schema(&schema));
+            let refusal = case.refused.iter().find(|(on, _)| *on == dialect);
+            if refusal.is_some() || !case.errors.is_empty() {
+                let problems = match compiled {
+                    Ok(_) => {
+                        failures.push(format!("{label}: compiles, but must be refused"));
+                        continue;
+                    }
+                    Err(problems) => problems,
+                };
+                let found = placed_problems(&case.text, &problems, buttercupql::Severity::Error);
+                match refusal {
+                    Some((_, message)) => {
+                        if !found.iter().any(|(_, _, said)| said == message) {
+                            failures.push(format!(
+                                "{label}: refused, but not with `{message}`: {found:?}"
+                            ));
+                        }
+                    }
+                    None if found != case.errors => failures.push(format!(
+                        "{label}: the errors are\n{found:?}\nnot\n{:?}",
+                        case.errors
+                    )),
+                    None => {}
+                }
+                continue;
+            }
+            let compiled = match compiled {
+                Ok(compiled) => compiled,
+                Err(problems) => {
+                    let messages: Vec<String> = problems.iter().map(ToString::to_string).collect();
+                    failures.push(format!(
+                        "{label}: does not compile: {}",
+                        messages.join("; ")
+                    ));
+                    continue;
+                }
+            };
+            let warned = placed_problems(
+                &case.text,
+                &compiled.warnings,
+                buttercupql::Severity::Warning,
+            );
+            if warned != case.warnings {
+                failures.push(format!(
+                    "{label}: the warnings are\n{warned:?}\nnot\n{:?}",
+                    case.warnings
+                ));
+            }
+            let Some(wanted) = &case.rows else {
+                continue;
+            };
+            let mut statements = setup.clone();
+            statements.extend(compiled.statements);
+            let result = match dialect {
+                Dialect::Sqlite => Some(sqlite_script(&statements, &[])),
+                Dialect::Postgres => postgres.as_mut().map(|client| {
+                    let schema = format!("bcql_conformance{n}_{}", std::process::id());
+                    let result = postgres_script(client, &schema, &[], &statements, &[]);
+                    let _ = client.batch_execute(&format!(
+                        "SET search_path TO public; DROP SCHEMA IF EXISTS {schema} CASCADE"
+                    ));
+                    result
+                }),
+                Dialect::ClickHouse => clickhouse
+                    .as_ref()
+                    .map(|clickhouse| clickhouse_script(clickhouse, &[], &statements, &[])),
+                Dialect::DuckDb => {
+                    if duckdb.is_some() {
+                        queued.push(QueuedScript {
+                            label: label.clone(),
+                            statements,
+                            rows: wanted.clone(),
+                            any_order: case.any_order,
+                            checks: Vec::new(),
+                        });
+                    }
+                    None
+                }
+            };
+            match result {
+                None => {}
+                Some(Err(error)) => {
+                    failures.push(format!("{label}: the database refused\n{error}"))
+                }
+                Some(Ok((rows, _))) if !same_rows(&rows, wanted, case.any_order) => {
+                    failures.push(format!(
+                        "{label}: wrong rows\n{}\ngot:\n{}\nwanted:\n{}",
+                        compiled.sql,
+                        shown(&rows),
+                        shown(wanted)
+                    ));
+                }
+                Some(Ok(_)) => {}
             }
         }
     }

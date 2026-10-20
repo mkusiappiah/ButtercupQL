@@ -1,0 +1,68 @@
+# The tables every case of the conformance suite starts from, with their rows.
+
+create table accounts:
+    id: str = field(primary_key=True)
+    operator: str
+    balance: int | None
+    opened: date
+
+create table cases:
+    id: int = field(primary_key=True)
+    key: str
+    account_id: str | None = field(references=accounts.id)
+    status: str
+    band: str | None
+    risk: int | None
+    raised: datetime
+    assignee: str | None
+    notes: str | None
+
+create table payments:
+    id: int = field(primary_key=True)
+    account_id: str = field(references=accounts.id)
+    amount: int
+    paid: datetime
+
+create table transfers:
+    source: str
+    target: str
+
+from [
+    {"id": "A1", "operator": "Acme", "balance": 120, "opened": date("2025-03-01")},
+    {"id": "A2", "operator": "Beta", "balance": None, "opened": date("2025-06-15")},
+    {"id": "A3", "operator": "acme", "balance": 0, "opened": date("2026-01-10")},
+]
+insert into accounts
+
+from [
+    {"id": 1, "key": "C1", "account_id": "A1", "status": "open", "band": "critical", "risk": 95,
+     "raised": datetime("2026-10-01 09:00"), "assignee": None, "notes": "50% off"},
+    {"id": 2, "key": "C2", "account_id": "A1", "status": "open", "band": "high", "risk": 90,
+     "raised": datetime("2026-10-02 10:30"), "assignee": "ana", "notes": "a_b"},
+    {"id": 3, "key": "C3", "account_id": "A2", "status": "open", "band": "low", "risk": 40,
+     "raised": datetime("2026-09-15 08:00"), "assignee": None, "notes": "A_B"},
+    {"id": 4, "key": "C4", "account_id": "A2", "status": "closed", "band": "critical", "risk": None,
+     "raised": datetime("2026-08-20 16:45"), "assignee": "ben", "notes": None},
+    {"id": 5, "key": "C5", "account_id": "A3", "status": "open", "band": None, "risk": -5,
+     "raised": datetime("2026-10-05 12:00"), "assignee": "", "notes": "plain"},
+    {"id": 6, "key": "C6", "account_id": None, "status": "open", "band": "high", "risk": 70,
+     "raised": datetime("2026-07-01 07:15"), "assignee": None, "notes": "5000 off"},
+]
+insert into cases
+
+from [
+    {"id": 1, "account_id": "A1", "amount": 100, "paid": datetime("2026-10-01 09:00")},
+    {"id": 2, "account_id": "A1", "amount": 250, "paid": datetime("2026-10-02 09:00")},
+    {"id": 3, "account_id": "A2", "amount": 40, "paid": datetime("2026-10-01 12:00")},
+    {"id": 4, "account_id": "A1", "amount": -50, "paid": datetime("2026-10-03 09:00")},
+    {"id": 5, "account_id": "A3", "amount": 75, "paid": datetime("2026-10-02 15:00")},
+]
+insert into payments
+
+from [
+    {"source": "A1", "target": "A2"},
+    {"source": "A2", "target": "A3"},
+    {"source": "A3", "target": "A1"},
+    {"source": "A3", "target": "A4"},
+]
+insert into transfers

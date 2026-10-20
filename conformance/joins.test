@@ -1,0 +1,75 @@
+# Joins and links: the rows of another table beside each row.
+
+=== join keeps the rows that match
+from cases
+join accounts on account_id == accounts.id
+sort key
+select key, operator
+--- rows
+["C1", "Acme"]
+["C2", "Acme"]
+["C3", "Beta"]
+["C4", "Beta"]
+["C5", "acme"]
+
+=== left join keeps the rows that do not match too
+from cases
+left join accounts on account_id == accounts.id
+where accounts.id is None
+select key
+--- rows
+["C6"]
+
+=== a link reads the row a key points to
+from cases
+sort key
+select key, who = account.operator
+--- rows
+["C1", "Acme"]
+["C2", "Acme"]
+["C3", "Beta"]
+["C4", "Beta"]
+["C5", "acme"]
+["C6", null]
+
+=== a link in a condition
+from cases
+where account.operator == "Acme"
+sort key
+select key
+--- rows
+["C1"]
+["C2"]
+
+=== a link that leads nowhere gives missing values
+from cases
+where account.id is None
+select key
+--- rows
+["C6"]
+
+=== grouping by a link's column
+from cases
+group by who = account.operator:
+    n = count()
+sort -n, who
+--- rows
+["Acme", 2]
+["Beta", 2]
+["acme", 1]
+[null, 1]
+
+=== a join with a named query
+big = (
+    from payments
+    where amount > 50
+)
+
+from accounts
+join big on accounts.id == big.account_id
+sort big.id
+select account = accounts.id, amount = big.amount
+--- rows
+["A1", 100]
+["A1", 250]
+["A3", 75]

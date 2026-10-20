@@ -1,0 +1,122 @@
+# Window functions: totals over a window of rows, keeping every row.
+
+=== a running total
+from payments
+so_far = sum(amount, sort=id)
+sort id
+select id, so_far
+--- rows
+[1, 100]
+[2, 350]
+[3, 390]
+[4, 340]
+[5, 415]
+
+=== a running total for each group
+from payments
+so_far = sum(amount, over=account_id, sort=paid)
+sort id
+select id, so_far
+--- rows
+[1, 100]
+[2, 350]
+[3, 40]
+[4, 300]
+[5, 75]
+
+=== the value of the row before
+from payments
+before = lag(amount, sort=id)
+sort id
+select id, before
+--- rows
+[1, null]
+[2, 100]
+[3, 250]
+[4, 40]
+[5, -50]
+
+=== the value of the row after
+from payments
+after = lead(amount, sort=id)
+sort id
+select id, after
+--- rows
+[1, 250]
+[2, 40]
+[3, -50]
+[4, 75]
+[5, null]
+
+=== a moving mean of two rows
+from payments
+pair = mean(amount, sort=id, rows=2)
+sort id
+select id, pair
+--- rows
+[1, 100]
+[2, 175]
+[3, 145]
+[4, -5]
+[5, 12.5]
+
+=== rank and dense_rank
+from cases
+where band is not None
+place = rank(sort=band)
+dense = dense_rank(sort=band)
+sort band, key
+select key, place, dense
+--- rows
+["C1", 1, 1]
+["C4", 1, 1]
+["C2", 3, 2]
+["C6", 3, 2]
+["C3", 5, 3]
+
+=== the first of each group, with a condition on the window value
+from cases
+place = rank(over=account_id, sort=-risk)
+where place == 1
+sort key
+select key
+--- rows
+["C1"]
+["C3"]
+["C5"]
+["C6"]
+
+=== a share of the group's total, on every row
+from payments
+where account_id == "A1"
+share = amount / sum(amount, over=account_id)
+sort id
+select id, share
+--- rows
+[1, 0.3333333333333333]
+[2, 0.8333333333333334]
+[4, -0.16666666666666666]
+
+=== the first value of each group
+from payments
+first_paid = first(amount, over=account_id, sort=paid)
+sort id
+select id, first_paid
+--- rows
+[1, 100]
+[2, 100]
+[3, 40]
+[4, 100]
+[5, 75]
+
+=== a window counts the rows the steps before kept
+from cases
+sort -risk, key
+take 3
+place = row_number(sort=key)
+sort key
+select key, place
+--- rows
+["C1", 1]
+["C2", 2]
+["C6", 3]

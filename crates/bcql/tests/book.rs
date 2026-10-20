@@ -240,6 +240,101 @@ fn the_reference_describes_every_function_and_method() {
 }
 
 #[test]
+fn the_grammar_defines_every_rule_it_uses_and_names_every_word() {
+    let page = read(&root().join("docs/book/src/spec/grammar.md"));
+    let mut grammar = String::new();
+    let mut inside = false;
+    for line in page.lines() {
+        if line.starts_with("```") {
+            inside = line == "```ebnf";
+            continue;
+        }
+        if inside {
+            grammar.push_str(line);
+            grammar.push('\n');
+        }
+    }
+    // A rule is `name = ... ;`; the words in quotes are tokens, and the other words are rules or the lexical
+    // structure's tokens, in capitals.
+    let mut defined = Vec::new();
+    let mut used = Vec::new();
+    let mut quoted = Vec::new();
+    for rule in grammar.split(" ;") {
+        let Some((name, body)) = rule.split_once(" = ") else {
+            continue;
+        };
+        defined.push(name.trim().to_string());
+        let mut rest = body;
+        while let Some(start) = rest.find('"') {
+            let (before, after) = rest.split_at(start);
+            used.extend(
+                before
+                    .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .filter(|word| !word.is_empty())
+                    .map(str::to_string),
+            );
+            let end = after[1..].find('"').expect("a closing quote") + 1;
+            quoted.push(after[1..end].to_string());
+            rest = &after[end + 1..];
+        }
+        used.extend(
+            rest.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .filter(|word| !word.is_empty())
+                .map(str::to_string),
+        );
+    }
+    let tokens = [
+        "NAME", "NUMBER", "STRING", "FSTRING", "NEWLINE", "INDENT", "DEDENT",
+    ];
+    for word in &used {
+        assert!(
+            tokens.contains(&word.as_str()) || defined.contains(word),
+            "the grammar uses `{word}`, which it does not define"
+        );
+    }
+    for rule in defined.iter().filter(|rule| rule.as_str() != "file") {
+        assert!(
+            used.contains(rule),
+            "the grammar defines `{rule}`, which nothing uses"
+        );
+    }
+    // Every step, statement and keyword is in it, and each of its words in quotes is one of the language's.
+    let words: Vec<&str> = buttercupql::builtins::STEPS
+        .iter()
+        .chain(buttercupql::builtins::STATEMENTS)
+        .map(|builtin| builtin.name)
+        .chain(buttercupql::builtins::KEYWORDS.iter().copied())
+        .collect();
+    for word in &words {
+        assert!(
+            quoted.iter().any(|token| token == word),
+            "the grammar does not name `{word}`"
+        );
+    }
+    let context = [
+        "by",
+        "into",
+        "on",
+        "table",
+        "index",
+        "unique",
+        "primary_key",
+        "rename",
+        "to",
+        "transaction",
+        "reverse",
+        "with",
+    ];
+    for token in &quoted {
+        let word = token.chars().all(|c| c.is_alphanumeric() || c == '_');
+        assert!(
+            !word || words.contains(&token.as_str()) || context.contains(&token.as_str()),
+            "the grammar names `{token}`, which is not one of the language's words"
+        );
+    }
+}
+
+#[test]
 fn the_schema_the_book_shows_is_the_one_its_examples_use() {
     let schema = read(&root().join("playground/schema.sql"));
     let statements: Vec<&str> = schema

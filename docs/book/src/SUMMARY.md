@@ -33,3 +33,11 @@
 
 - [Functions and methods](functions.md)
 - [Design and research](design.md)
+
+# Specification
+
+- [The specification](spec/index.md)
+  - [Lexical structure](spec/lexical.md)
+  - [Grammar](spec/grammar.md)
+  - [Meaning](spec/meaning.md)
+  - [The databases](spec/databases.md)

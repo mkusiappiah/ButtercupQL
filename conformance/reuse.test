@@ -1,0 +1,103 @@
+# Named queries, values and def.
+
+=== a named query is read with from
+open_cases = (
+    from cases
+    where status == "open"
+)
+
+from open_cases
+summarize:
+    n = count()
+--- rows
+[5]
+
+=== a named query is read in another
+open_cases = (
+    from cases
+    where status == "open"
+)
+risky = (
+    from open_cases
+    where risk > 80
+)
+
+from risky
+sort key
+select key
+--- rows
+["C1"]
+["C2"]
+
+=== a value named before the query
+threshold = 80
+
+from cases
+where risk > threshold
+sort key
+select key
+--- rows
+["C1"]
+["C2"]
+
+=== a value's name means the value, where a column has the name too
+amount = 7
+
+from payments
+where id == 1
+select id, amount
+--- rows
+[1, 7]
+
+=== a def's steps are put where it is called
+def recent(days_back=7):
+    where raised > datetime("2026-10-05 00:00") - days(days_back)
+
+from cases
+recent(3)
+sort key
+select key
+--- rows
+["C2"]
+["C5"]
+
+=== a def's arguments by name, and its defaults
+def recent(days_back=7):
+    where raised > datetime("2026-10-05 00:00") - days(days_back)
+
+from cases
+recent(days_back=10)
+sort key
+select key
+--- rows
+["C1"]
+["C2"]
+["C5"]
+
+=== a def whose body starts with from is a query, read in a from
+def for_account(account: str):
+    from cases
+    where account_id == account
+
+from for_account("A2")
+sort key
+select key
+--- rows
+["C3"]
+["C4"]
+
+=== a def can call another
+def open_only():
+    where status == "open"
+
+def risky_open(at_least=50):
+    open_only()
+    where risk >= at_least
+
+from cases
+risky_open(90)
+sort key
+select key
+--- rows
+["C1"]
+["C2"]

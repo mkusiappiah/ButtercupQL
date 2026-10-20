@@ -1,0 +1,103 @@
+# Tables, indexes, permissions and stored defs.
+
+=== a table made, then rows put in it, its defaults filling the rest
+create table watched:
+    key: str = field(primary_key=True)
+    level: int = 1
+    note: str | None
+
+from [{"key": "C1", "note": "look"}, {"key": "C2", "note": None}]
+insert into watched
+
+from watched
+sort key
+--- rows
+["C1", 1, "look"]
+["C2", 1, null]
+
+=== a table altered: a column added, one renamed and one dropped
+alter table transfers:
+    hops: int = 1
+    rename target to destination
+    del source
+
+from transfers
+sort destination
+--- rows
+["A1", 1]
+["A2", 1]
+["A3", 1]
+["A4", 1]
+
+=== the statements after an alter table read its new columns
+alter table transfers:
+    rename target to destination
+
+from transfers
+where destination == "A4"
+select source
+--- rows
+["A3"]
+
+=== a table dropped
+drop table transfers
+
+from accounts
+summarize:
+    n = count()
+--- rows
+[3]
+
+=== a table dropped is gone for the statements after it
+drop table transfers
+
+from transfers
+--- error
+3:6 there is no table `transfers`
+
+=== a table made is checked by the statements after it
+create table watched:
+    key: str
+    since: datetime
+
+from watched
+where sicne > datetime("2026-01-01 00:00")
+--- error
+6:7 there is no column `sicne` in `watched`
+
+=== an index
+create index on cases(-risk, raised)
+
+from cases
+where risk > 90
+select key
+--- rows
+["C1"]
+--- refused on clickhouse
+ClickHouse has no indexes like this
+
+=== permissions are given and taken away
+grant read, write on cases, accounts to analyst
+revoke write on accounts from analyst
+--- refused on sqlite
+SQLite has no users or permissions
+--- refused on duckdb
+DuckDB has no users or permissions
+
+=== a permission that does not exist
+grant reed on cases to analyst
+--- error
+1:7 there is no permission `reed`
+--- refused on sqlite
+SQLite has no users or permissions
+--- refused on duckdb
+DuckDB has no users or permissions
+
+=== a stored def
+@stored
+def risky_for(account: str, at_least: int):
+    from cases
+    where account_id == account and risk >= at_least
+    select key, risk
+--- refused on sqlite
+SQLite can't keep a query in the database

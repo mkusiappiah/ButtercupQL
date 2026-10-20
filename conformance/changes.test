@@ -1,0 +1,143 @@
+# Changes to rows: update, delete and insert into, at the end of a query. Each case runs on tables of its own, and
+# ends with a query that reads what it changed.
+
+=== update gives new values to the rows a where chooses
+from accounts
+where id == "A1"
+update balance += 30, operator = "Acme Ltd"
+
+from accounts
+sort id
+select id, operator, balance
+--- rows
+["A1", "Acme Ltd", 150]
+["A2", "Beta", null]
+["A3", "acme", 0]
+
+=== an update's values keep Python's meaning
+from payments
+where id == 3
+update amount = amount // 3
+
+from payments
+where id == 4
+update amount = amount // 3
+
+from payments
+where id == 3 or id == 4
+sort id
+select id, amount
+--- rows
+[3, 13]
+[4, -17]
+
+=== an update can choose its rows through a link
+from cases
+where account.operator == "Beta"
+update status = "moved"
+
+from cases
+where status == "moved"
+sort key
+select key
+--- rows
+["C3"]
+["C4"]
+
+=== delete removes the rows a where chooses
+from cases
+where status == "closed"
+delete
+
+from cases
+summarize:
+    n = count()
+--- rows
+[5]
+
+=== a delete with no where removes every row, and says so
+from transfers
+delete
+
+from transfers
+summarize:
+    n = count()
+--- rows
+[0]
+--- warning
+2:1 this deletes every row
+
+=== insert into adds the rows of a query, by their columns' names
+create table archive:
+    key: str = field(primary_key=True)
+    risk: int | None
+
+from cases
+where status == "closed" or risk < 0
+select risk, key
+insert into archive
+
+from archive
+sort key
+--- rows
+["C4", null]
+["C5", -5]
+
+=== insert into adds rows written in the query
+from [{"source": "A4", "target": "A1"}, {"target": "A3", "source": "A1"}]
+insert into transfers
+
+from transfers
+where source == "A4" or target == "A3"
+sort source, target
+--- rows
+["A1", "A3"]
+["A2", "A3"]
+["A4", "A1"]
+
+=== a select after a change gives the rows it changed
+from transfers
+where source == "A3"
+update target = target + "!"
+select source, target
+--- rows in any order
+["A3", "A1!"]
+["A3", "A4!"]
+--- refused on clickhouse
+ClickHouse can't give the rows a change makes
+
+=== a def that changes rows is called on a line of its own
+def close(wanted: str):
+    from cases
+    where key == wanted
+    update status = "closed"
+
+close("C1")
+
+from cases
+where status == "closed"
+sort key
+select key
+--- rows
+["C1"]
+["C4"]
+
+=== the statements of a transaction all run
+with transaction:
+    from accounts
+    where id == "A1"
+    update balance -= 20
+
+    from accounts
+    where id == "A3"
+    update balance += 20
+
+from accounts
+sort id
+select id, balance
+--- rows
+["A1", 100]
+["A2", null]
+["A3", 20]
+--- refused on clickhouse
+ClickHouse runs no transactions

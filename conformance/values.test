@@ -1,0 +1,323 @@
+# Values: Python's arithmetic, text, dates, missing values and truth, on every database.
+
+=== / divides exactly, whole numbers too
+from accounts
+where id == "A1"
+select eighth = balance / 8, half = 7 / 2
+--- rows
+[15, 3.5]
+
+=== // rounds down, as Python's does
+from accounts
+where id == "A1"
+select a = 7 // 2, b = -7 // 2, c = balance // 7, d = -balance // 7
+--- rows
+[3, -4, 17, -18]
+
+=== % takes the sign of the number it divides by
+from accounts
+where id == "A1"
+select a = 7 % 3, b = -7 % 3, c = 7 % -3, d = balance % 7
+--- rows
+[1, 2, -2, 1]
+
+=== ** raises to a power
+from accounts
+where id == "A1"
+select a = 2 ** 10, b = balance ** 2, c = 3 ** 1
+--- rows
+[1024, 14400, 3]
+
+=== arithmetic with a missing value gives a missing value
+from accounts
+where id == "A2"
+select plus = balance + 1, times = balance * 2
+--- rows
+[null, null]
+
+=== == None finds the missing values
+from cases
+where assignee == None
+sort key
+select key
+--- rows
+["C1"]
+["C3"]
+["C6"]
+
+=== != None finds the values that are there, empty text too
+from cases
+where assignee != None
+sort key
+select key
+--- rows
+["C2"]
+["C4"]
+["C5"]
+
+=== is None and is not None
+from cases
+where risk is None or band is None
+sort key
+select key, missing_risk = risk is None
+--- rows
+["C4", true]
+["C5", false]
+
+=== a comparison with a missing value does not hold
+from cases
+where risk > 0
+sort key
+select key
+--- rows
+["C1"]
+["C2"]
+["C3"]
+["C6"]
+
+=== not of a missing comparison does not hold either
+from cases
+where not (risk > 50)
+sort key
+select key
+--- rows
+["C3"]
+["C5"]
+
+=== in a list
+from cases
+where band in ["high", "low"]
+sort key
+select key
+--- rows
+["C2"]
+["C3"]
+["C6"]
+
+=== in a list that holds None finds the missing values too
+from cases
+where band in ["low", None]
+sort key
+select key
+--- rows
+["C3"]
+["C5"]
+
+=== not in a list that holds None keeps no missing value
+from cases
+where band not in ["low", None]
+sort key
+select key
+--- rows
+["C1"]
+["C2"]
+["C4"]
+["C6"]
+
+=== comparisons chain, as in Python
+from cases
+where 40 <= risk <= 90
+sort key
+select key
+--- rows
+["C2"]
+["C3"]
+["C6"]
+
+=== and binds closer than or
+from cases
+where band == "high" or band == "low" and risk > 50
+sort key
+select key
+--- rows
+["C2"]
+["C6"]
+
+=== a value that depends on a condition
+from cases
+sort key
+select key, level = "urgent" if risk >= 90 else "normal"
+--- rows
+["C1", "urgent"]
+["C2", "urgent"]
+["C3", "normal"]
+["C4", "normal"]
+["C5", "normal"]
+["C6", "normal"]
+
+=== + joins text
+from accounts
+sort id
+select label = id + ": " + operator
+--- rows
+["A1: Acme"]
+["A2: Beta"]
+["A3: acme"]
+
+=== f-strings
+from cases
+where risk is not None
+sort key
+take 2
+select label = f"{key}:{risk}"
+--- rows
+["C1:95"]
+["C2:90"]
+
+=== len counts characters
+from cases
+where key == "C1"
+select n = len(notes), empty = len("")
+--- rows
+[7, 0]
+
+=== lower and upper
+from accounts
+where operator.lower() == "acme"
+sort id
+select id, shout = operator.upper()
+--- rows
+["A1", "ACME"]
+["A3", "ACME"]
+
+=== startswith takes its text as it is, % and all
+from cases
+where notes.startswith("50%")
+select key
+--- rows
+["C1"]
+
+=== startswith minds capitals and underscores
+from cases
+where notes.startswith("a_")
+select key
+--- rows
+["C2"]
+
+=== endswith minds capitals
+from cases
+where notes.endswith("_B")
+select key
+--- rows
+["C3"]
+
+=== in finds text in text, minding capitals
+from accounts
+where "Ac" in operator
+select id
+--- rows
+["A1"]
+
+=== a % sign in text is a % sign
+from cases
+where "%" in notes
+select key
+--- rows
+["C1"]
+
+=== replace and strip
+from cases
+where key == "C6"
+select swapped = notes.replace("0", "o"), trimmed = ("  " + key + " ").strip()
+--- rows
+["5ooo off", "C6"]
+
+=== text that is not empty is true
+from cases
+where assignee
+sort key
+select key
+--- rows
+["C2"]
+["C4"]
+
+=== not of a missing value is true, as not None is in Python
+from cases
+where not notes
+select key
+--- rows
+["C4"]
+
+=== not of empty text and of a missing value
+from cases
+where not assignee
+sort key
+select key
+--- rows
+["C1"]
+["C3"]
+["C5"]
+["C6"]
+
+=== or and and take a missing value as false
+from cases
+where not (notes and risk > 50)
+sort key
+select key
+--- rows
+["C3"]
+["C4"]
+["C5"]
+
+=== a number that is not 0 is true
+from accounts
+where balance
+select id
+--- rows
+["A1"]
+
+=== abs, int, float and str
+from cases
+where key == "C5"
+select a = abs(risk), b = int(-2.7), c = float(risk) / 2, d = str(risk)
+--- rows
+[5, -2, -2.5, "-5"]
+
+=== round takes a half to the even neighbour, as Python's does
+from accounts
+where id == "A1"
+select a = round(2.5), b = round(-2.5), c = round(3.5), d = round(0.125, 2), e = round(1250, -2), f = round(1350, -2), g = round(2.6), h = round(balance / 7, 2)
+--- rows
+[2, -2, 4, 0.12, 1200, 1400, 3, 17.14]
+
+=== the parts of a date and time
+from cases
+where key == "C2"
+select year = raised.year, month = raised.month, day = raised.day, hour = raised.hour
+--- rows
+[2026, 10, 2, 10]
+
+=== dates and times compare in time's order
+from cases
+where raised >= datetime("2026-10-01 00:00")
+sort key
+select key
+--- rows
+["C1"]
+["C2"]
+["C5"]
+
+=== a length of time added to a date
+from accounts
+where opened + days(30) > date("2025-07-01")
+sort id
+select id
+--- rows
+["A2"]
+["A3"]
+
+=== the day of a date and time
+from cases
+where raised.date() == date("2026-10-02")
+select key
+--- rows
+["C2"]
+
+=== numbers may hold underscores
+from accounts
+where balance < 1_000
+sort id
+select id
+--- rows
+["A1"]
+["A3"]

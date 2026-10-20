@@ -1,0 +1,114 @@
+# Combining queries with Python's set operators, and recursive queries.
+
+=== + keeps the rows of both
+both = (from accounts; select id) + (from transfers; select id = target)
+
+from both
+sort id
+--- rows
+["A1"]
+["A1"]
+["A2"]
+["A2"]
+["A3"]
+["A3"]
+["A4"]
+
+=== | keeps each row once
+both = (from accounts; select id) | (from transfers; select id = target)
+
+from both
+sort id
+--- rows
+["A1"]
+["A2"]
+["A3"]
+["A4"]
+
+=== & keeps the rows that are in both
+both = (from accounts; select id) & (from transfers; select id = source)
+
+from both
+sort id
+--- rows
+["A1"]
+["A2"]
+["A3"]
+
+=== - keeps the rows of the first that are not in the second
+others = (from transfers; select id = target) - (from accounts; select id)
+
+from others
+--- rows
+["A4"]
+
+=== the second query's columns are matched by name
+both = (
+    from accounts
+    where id == "A1"
+    select id, operator
+) + (
+    from accounts
+    where id == "A2"
+    select operator, id
+)
+
+from both
+sort id
+--- rows
+["A1", "Acme"]
+["A2", "Beta"]
+
+=== a recursive query follows a chain, as far as its condition lets it
+reached = (
+    from [{"id": "A1", "steps": 0}]
+) + (
+    from transfers
+    join reached on source == reached.id
+    where reached.steps < 3
+    select id = target, steps = reached.steps + 1
+)
+
+from reached
+sort steps, id
+--- rows
+["A1", 0]
+["A2", 1]
+["A3", 2]
+["A1", 3]
+["A4", 3]
+
+=== a recursive query with | ends at a loop by itself
+reached = (
+    from [{"id": "A1"}]
+) | (
+    from transfers
+    join reached on source == reached.id
+    select id = target
+)
+
+from reached
+sort id
+--- rows
+["A1"]
+["A2"]
+["A3"]
+["A4"]
+--- refused on clickhouse
+ClickHouse's recursive queries keep every row, so they add rows with `+`
+
+=== a recursive query makes rows of its own
+numbers = (
+    from [{"n": 1}]
+) + (
+    from numbers
+    where n < 5
+    select n = n + 1
+)
+
+from numbers
+summarize:
+    total = sum(n)
+    rows = count()
+--- rows
+[15, 5]

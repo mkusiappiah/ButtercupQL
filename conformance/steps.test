@@ -1,0 +1,248 @@
+# Steps: one per line, each working on the rows of the steps before it.
+
+=== from gives every row of a table
+from accounts
+sort id
+select id
+--- rows
+["A1"]
+["A2"]
+["A3"]
+
+=== wheres add up
+from cases
+where status == "open"
+where risk > 50
+sort key
+select key
+--- rows
+["C1"]
+["C2"]
+["C6"]
+
+=== select chooses and names the columns
+from accounts
+sort id
+select id, who = operator
+--- rows
+["A1", "Acme"]
+["A2", "Beta"]
+["A3", "acme"]
+
+=== a step of its own adds a column
+from cases
+where key == "C1"
+double = risk * 2
+select key, double
+--- rows
+["C1", 190]
+
+=== a step of its own gives a column a new value
+from cases
+where key == "C1"
+risk = risk + 1
+select key, risk
+--- rows
+["C1", 96]
+
+=== del drops columns
+from accounts
+where id == "A1"
+del balance, opened
+--- rows
+["A1", "Acme"]
+
+=== sort takes its keys in order, - for high to low
+from cases
+sort status, -risk
+select key
+--- rows
+["C4"]
+["C1"]
+["C2"]
+["C6"]
+["C3"]
+["C5"]
+
+=== missing values sort last, high to low
+from cases
+sort -risk, key
+select key
+--- rows
+["C1"]
+["C2"]
+["C6"]
+["C3"]
+["C5"]
+["C4"]
+
+=== missing values sort last, low to high
+from cases
+sort risk, key
+select key
+--- rows
+["C5"]
+["C3"]
+["C6"]
+["C2"]
+["C1"]
+["C4"]
+
+=== reverse=True sorts high to low, missing values still last
+from cases
+sort risk, reverse=True
+select key
+--- rows
+["C1"]
+["C2"]
+["C6"]
+["C3"]
+["C5"]
+["C4"]
+
+=== a sort keeps the order before it for the rows that tie
+from cases
+sort -risk
+sort status
+select key
+--- rows
+["C4"]
+["C1"]
+["C2"]
+["C6"]
+["C3"]
+["C5"]
+
+=== take
+from cases
+sort key
+take 2
+select key
+--- rows
+["C1"]
+["C2"]
+
+=== skip
+from cases
+sort key
+skip 4
+select key
+--- rows
+["C5"]
+["C6"]
+
+=== skip, then take
+from cases
+sort key
+skip 1
+take 2
+select key
+--- rows
+["C2"]
+["C3"]
+
+=== take twice takes the fewer
+from cases
+sort key
+take 4
+take 2
+select key
+--- rows
+["C1"]
+["C2"]
+
+=== a where after take works on the rows taken
+from cases
+sort -risk, key
+take 3
+where band == "high"
+select key
+--- rows
+["C2"]
+["C6"]
+
+=== distinct keeps each row once
+from cases
+select status
+distinct
+sort status
+--- rows
+["closed"]
+["open"]
+
+=== a sort after a select sorts by the new columns
+from cases
+where risk is not None
+select key, risk = -risk
+sort risk
+take 2
+--- rows
+["C1", -95]
+["C2", -90]
+
+=== a sort before a select sorts by the old columns
+from cases
+where risk is not None
+sort risk
+select key, risk = -risk
+--- rows
+["C5", 5]
+["C3", -40]
+["C6", -70]
+["C2", -90]
+["C1", -95]
+
+=== a where before a select reads the old columns
+from cases
+where risk > 50
+select key, risk = risk - 40
+sort key
+--- rows
+["C1", 55]
+["C2", 50]
+["C6", 30]
+
+=== a select's columns read the columns before it, not each other
+from cases
+where key == "C1"
+select risk = risk * 2, before = risk
+--- rows
+[190, 95]
+
+=== pass does nothing
+from accounts
+pass
+sort id
+select id
+--- rows
+["A1"]
+["A2"]
+["A3"]
+
+=== ; puts steps on one line
+from cases; where risk > 90; select key
+--- rows
+["C1"]
+
+=== a query in brackets is a value, after in
+from cases
+where account_id in (from accounts; where operator == "Beta"; select id)
+sort key
+select key
+--- rows
+["C3"]
+["C4"]
+
+=== a query in brackets can span lines
+from cases
+where account_id not in (
+    from accounts
+    where operator == "Beta"
+    select id
+)
+sort key
+select key
+--- rows
+["C1"]
+["C2"]
+["C5"]

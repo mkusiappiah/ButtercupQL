@@ -16,6 +16,11 @@
   named queries, and `pivot`.
 - Each in its database's own form, ClickHouse's mutations and parameterized views among them, and refused with a
   message where the database has no such thing.
+- A formal specification ([docs/book/src/spec](docs/book/src/spec/index.md)): the lexical structure, the grammar in
+  EBNF, what each form means, and what each database is given and can't do. A test checks that the grammar defines
+  every rule it uses and names every word of the language.
+- The conformance suite ([conformance](conformance)): 143 cases, each a text and the rows or the errors it gives,
+  from tables written in ButtercupQL, which the tests run on SQLite, PostgreSQL, DuckDB and ClickHouse.
 - `bcql compile` writes each statement of a script, ended with `;`, with its own parameters; `--json` gives them as
   `statements`. The language server completes, describes and outlines statements, and the VS Code extension colours
   them and shows each in Show SQL. The playground shows each statement's parameters, with examples of changes, a
