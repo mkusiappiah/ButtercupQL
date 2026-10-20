@@ -8,6 +8,8 @@ see the SQL it compiles to as you type.
 - **The schema** below the query checks names, and lets links be followed. It starts with the tables of
   [Schemas](schemas.md); change them, or clear them to compile without a schema.
 - **A query `def` or a named query** can be compiled on its own: choose it beside the SQL, and see its arguments.
+- **A text of several statements,** such as the example that changes data, shows each statement's SQL, and the
+  parameters of each.
 - **Share** copies a link with the query, the database and the schema in it.
 
 The compiler runs in the browser: it is ButtercupQL's own compiler, built for WebAssembly. Nothing you write is sent

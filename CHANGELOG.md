@@ -4,6 +4,22 @@
 
 ### Added
 
+- Changing data ([docs/book/src/changing-data.md](docs/book/src/changing-data.md)): `update`, `delete` and
+  `insert into` as steps at the end of a query, on the rows the steps before them choose; rows written in the query,
+  `from [{...}]`; a `select` after a change for the rows it changed; and `def`s that change rows, called on a line of
+  their own.
+- Tables and permissions ([docs/book/src/tables.md](docs/book/src/tables.md)): `create table` with its columns as
+  Python's annotations, indexes, `alter table`, `drop table` and `drop index`; `with transaction:`; `grant` and
+  `revoke`; and `@stored`, which keeps a `def` in the database as a function, a macro, a view or a procedure. A
+  script's statements are checked against the tables it creates and changes.
+- Combining queries ([docs/book/src/combining.md](docs/book/src/combining.md)) with `+`, `|`, `&` and `-`, recursive
+  named queries, and `pivot`.
+- Each in its database's own form, ClickHouse's mutations and parameterized views among them, and refused with a
+  message where the database has no such thing.
+- `bcql compile` writes each statement of a script, ended with `;`, with its own parameters; `--json` gives them as
+  `statements`. The language server completes, describes and outlines statements, and the VS Code extension colours
+  them and shows each in Show SQL. The playground shows each statement's parameters, with examples of changes, a
+  recursive query and a pivot.
 - Python: `buttercupql.run(connection, text)` compiles a text for the database a connection is to and runs it with
   the database's own driver (`sqlite3`, `psycopg`, `psycopg2`, `pg8000`, `duckdb`, or a `clickhouse_connect`
   client), as one transaction, and gives the rows with their columns' names. `read_schema(connection)` reads the

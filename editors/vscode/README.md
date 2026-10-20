@@ -13,17 +13,18 @@ take 20
 
 This extension gives `.bcql` files:
 
-- **Colours** for steps, functions, strings, numbers and comments.
+- **Colours** for steps, statements such as `create table` and `grant`, `@stored`, types, functions, strings,
+  numbers and comments.
 - **Problems as you type,** each at its place with a suggestion, as `bcql check` finds them. Every query in a file is
   checked: the main query, each named query and each query `def`.
-- **Completion** of steps, functions, methods, the file's own definitions, and, with a schema, tables, columns and
-  links (`account.` lists the columns of the account a row points to).
-- **Descriptions** of a step, function, column or definition when the pointer rests on it.
+- **Completion** of steps, statements, functions, methods, the file's own definitions and the tables it creates,
+  and, with a schema, tables, columns and links (`account.` lists the columns of the account a row points to).
+- **Descriptions** of a step, statement, function, column or definition when the pointer rests on it.
 - **Go to definition**, into the modules a file imports too.
-- **An outline** of the file's definitions.
+- **An outline** of the file's definitions, the tables it creates, and its changes to rows.
 - **Show SQL** (the database button above the editor): the SQL the query compiles to, beside the file, kept up to date
   as you type. With the cursor in a query `def` or a named query, it shows that one, its arguments left as
-  placeholders.
+  placeholders. A file of several statements shows each, with its own parameters.
 
 ## The `bcql` command
 

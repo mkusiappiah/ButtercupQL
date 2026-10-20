@@ -222,6 +222,42 @@ SQL would quietly return no rows.
   `max()` of no rows are missing.
 - **Truth.** A `where` takes a value's truth as Python does: `0`, `""` and `None` are false.
 
+## Changing data and the database
+
+Approved on 20 October 2026, for v0.2.
+
+**A change is a step at the end of a query.** `update`, `delete` and `insert into` work on the rows the steps before
+them choose, so a change reads as the query that finds its rows:
+
+```python
+from cases
+where status == "open" and raised < now() - days(90)
+update status = "stale"
+```
+
+```sql
+UPDATE cases SET status = $1
+WHERE status = $2 AND raised < now() - INTERVAL '90 days'
+-- parameters: ["stale", "open"]
+```
+
+Only `where`, and the steps of a `def` called on a line of its own, choose the rows to change. A `select` after a
+change gives the rows it changed. Rows written in the query, `from [{"id": "A9", "operator": "Acme"}]`, go into a
+table with `insert into` as the rows of a query do, by their columns' names.
+
+- **Tables are written as Python's annotations,** as dataclasses are: `name: type`, `| None` for a column that can
+  be missing, `= default`, and `field(primary_key=True, unique=True, references=accounts.id)`.
+  `create index on cases(-risk)` keeps the order a sort takes. `alter table` adds columns, renames them with
+  `rename a to b` and drops them with `del`, and `drop table` drops a table.
+- **Queries combine with Python's set operators:** `+` is `UNION ALL`, `|` is `UNION`, `&` is `INTERSECT` and `-` is
+  `EXCEPT`, their columns matched by name. A named query that reads itself is recursive.
+- **The rest.** `@stored` keeps a `def` in the database: a function, a macro or a view, and on PostgreSQL a procedure
+  for a `def` that changes rows. `with transaction:` runs the statements below it together.
+  `grant read, write on cases to analyst` and `revoke ... from ...` give and take permissions.
+  `pivot band in ["high", "low"] by operator:` makes a column of each total for each value.
+- **What a database can't do is refused,** with a message that says so: ClickHouse runs no transactions, and SQLite
+  has no users to give permissions to.
+
 ## What the compiler gives back
 
 The SQL text and its parameters, in order. From Python:
@@ -307,8 +343,8 @@ Settled while building the parser, each as Python does it where Python has an an
 
 ## Not yet
 
-- Writing data (`insert`, `update`, `delete`) and creating tables.
-- `match`, recursive queries, pivots, and subtracting one date from another.
+- `match`, and subtracting one date from another.
+- Pivots whose values the query finds, rather than ones written out.
 
 ## Decisions
 
@@ -318,3 +354,10 @@ Approved on 20 October 2026:
 2. `mean(x)` for averages, with `avg(x)` accepted.
 3. The `.bcql` extension and the `bcql` command (`bql` is taken by another project).
 4. Links from the schema in v0.2, after the first release. They came sooner, with the compiler's fourth step.
+
+Approved on 20 October 2026, for v0.2:
+
+5. Changes to rows as steps at the end of a query, rather than statements of their own.
+6. Tables written as Python's annotations, rather than as SQL's column definitions.
+7. Python's set operators to combine queries, and a named query that reads itself for recursion.
+8. `@stored`, `with transaction:`, `grant` and `revoke`, and `pivot ... by ...:`, as written above.

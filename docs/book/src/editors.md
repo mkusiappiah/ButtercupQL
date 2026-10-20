@@ -5,14 +5,17 @@
 - **shows each problem as you type,** at its place with its message, as `bcql check` finds them. Every query of a file
   is checked: the main query, each named query and each query `def`. A problem in an imported module is shown on the
   import that reads it, with a link to its place in the module.
-- **completes names:** the steps at the start of a line; the tables after `from` and `join`; functions, the file's
-  own definitions and, with a schema, the columns and links of the tables read; and after a dot, a table's or a link's
-  columns, a module's names, or the methods.
-- **describes a name** when the pointer rests on it: a step, a function, a column with its type, a link, or a `def`
-  with its docstring.
+- **completes names:** the steps and statements at the start of a line, and `stored` after `@`; the tables after
+  `from`, `join`, `insert into`, `alter table`, `drop table` and `on`, those the file creates too; functions, the
+  file's own definitions and, with a schema, the columns and links of the tables read; and after a dot, a table's or
+  a link's columns, a module's names, or the methods.
+- **describes a name** when the pointer rests on it: a step, a statement, a function, a column with its type, a
+  link, or a `def` with its docstring.
 - **goes to a definition,** in the file or in a module it imports.
-- **lists a file's definitions,** for the editor's outline.
-- **gives the SQL of a query** for the editor to show, with the `buttercupql/compile` request.
+- **lists a file's definitions,** for the editor's outline: its `def`s, named queries and values, the tables it
+  creates, and each change to rows, such as `insert into archive`.
+- **gives the SQL of a text** for the editor to show, with the `buttercupql/compile` request: its SQL and parameters,
+  and each statement of a text of several.
 
 It reads the files a file imports as the editor has them, saved or not.
 
@@ -20,7 +23,8 @@ It reads the files a file imports as the editor has them, saved or not.
 
 The ButtercupQL extension adds colours to `.bcql` files, runs the language server, and adds **Show SQL**: the SQL of the
 query beside the file, kept up to date as you type. With the cursor in a query `def` or a named query, it shows that
-one, its arguments left as placeholders.
+one, its arguments left as placeholders. A file of several statements shows each, ended with `;` and with its own
+parameters.
 
 Each [release](https://github.com/mkusiappiah/ButtercupQL/releases) has the extension: one file for each platform,
 with `bcql` in it, and one for any platform, which uses the `bcql` on your `PATH`. Install it with

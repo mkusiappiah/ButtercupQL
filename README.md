@@ -121,6 +121,56 @@ LIMIT $2
 
 - **Modules.** `from shared import recent` reads `shared.bcql` beside the file, as Python's imports do.
 
+## Changing data and the database
+
+```python
+create table archive:
+    key: str = field(primary_key=True)
+    risk: int | None
+
+from cases
+where status == "closed"
+select key, risk
+insert into archive
+
+from cases
+where status == "closed"
+delete
+```
+
+becomes, on SQLite, statements that run in order:
+
+```sql sqlite
+CREATE TABLE archive (
+  key TEXT NOT NULL,
+  risk INTEGER,
+  PRIMARY KEY (key)
+);
+
+INSERT INTO archive (key, risk)
+SELECT key, risk
+FROM cases
+WHERE status = ?;
+-- parameters: ["closed"]
+
+DELETE FROM cases
+WHERE status = ?;
+-- parameters: ["closed"]
+```
+
+- **Changes are steps at the end of a query:** `update status = "closed", risk += 1`, `delete` and
+  `insert into archive` change the rows the steps before them choose. A `select` after a change gives the rows it
+  changed.
+- **Tables are Python's annotations,** with `| None` for a column that can be missing, defaults, and
+  `field(primary_key=True, references=accounts.id)`; indexes keep a sort's order, `create index on cases(-risk)`;
+  and `alter table` and `drop table` change them.
+- **`with transaction:`** runs statements together, `grant` and `revoke` give and take permissions, and `@stored`
+  keeps a `def` in the database as a function, a macro, a view or a procedure.
+- **Queries combine with Python's set operators:** `+`, `|`, `&` and `-` are `UNION ALL`, `UNION`, `INTERSECT` and
+  `EXCEPT`. A named query that reads itself is recursive, and `pivot` makes a column of each total for each value.
+- What a database can't do is refused with a message that says so: ClickHouse runs no transactions, and SQLite has no
+  permissions.
+
 ## Try it
 
 [Each release](https://github.com/mkusiappiah/ButtercupQL/releases) has `bcql` built for Linux, macOS and Windows.
@@ -185,13 +235,16 @@ macOS and Windows.
 import sqlite3
 import buttercupql
 
-query = buttercupql.compile(open("open_critical.bcql").read(), dialect="sqlite")
-rows = sqlite3.connect("cases.db").execute(query.sql, query.params).fetchall()
+db = sqlite3.connect("cases.db")
+rows = buttercupql.run(db, open("open_critical.bcql").read())
 ```
 
-A mistake raises `buttercupql.CompileError`, which holds every problem found and shows each under its line. A query
-`def` compiled with `query="for_operator"` gives its arguments with `query.bind(operator="Acme")`. The package also
-installs the `bcql` command. [crates/python](crates/python) describes it.
+`run()` compiles a text for the database a connection is to, `sqlite3`, `psycopg`, `duckdb` or a ClickHouse client,
+runs it as one transaction, and gives the rows with their columns' names. `compile()` gives the SQL and its
+parameters, for any driver. A mistake raises `buttercupql.CompileError`, which holds every problem found and shows
+each under its line. In Jupyter, `%load_ext buttercupql` gives the `%%bcql` cell magic, which runs a cell on a
+connection and shows its rows, its names checked against the database's own tables first. The package also installs
+the `bcql` command. [crates/python](crates/python) describes it.
 
 ## Using it from Rust
 
@@ -206,7 +259,8 @@ On failure, `compile` returns every problem found; `render` shows one as `bcql` 
 
 ## Status
 
-Version 0.1.0, released on 20 October 2026, is the first. The language design is approved:
+Version 0.1.0, released on 20 October 2026, is the first. Changing data and the database, combining queries,
+recursion and pivots are done on `main`, for the next version. The language design is approved:
 [docs/design.md](docs/design.md) describes it, and [docs/research.md](docs/research.md) the research behind it. [The
 book](https://mkusiappiah.github.io/ButtercupQL/) teaches the language and is its reference; its source is in
 [docs/book](docs/book), and every example in it is checked by the tests. The compiler is built for SQLite, PostgreSQL,
@@ -222,6 +276,10 @@ its queries on all four databases.
 4. **More:** imports, window functions, links and queries with arguments; DuckDB and ClickHouse (done)
 5. **Publishing:** the `buttercupql` Python package, the book, editor support and the playground (done: version 0.1.0,
    20 October 2026)
+6. **Changing data and the database:** `update`, `delete` and `insert into`; tables, indexes, transactions,
+   permissions and stored `def`s; combining queries, recursion and pivots; `run()` and the notebook magic in Python
+   (done)
+7. **A formal specification,** with conformance tests that run on every database (in progress)
 
 ## Building
 

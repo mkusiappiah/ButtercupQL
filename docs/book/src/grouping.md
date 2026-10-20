@@ -99,3 +99,42 @@ FROM (
   HAVING count(*) > 100
 ) AS _q1
 ```
+
+## Pivots
+
+`pivot` makes a column of each total for each value of a column: one row for each group of `by`, with the open
+cases of each band side by side.
+
+```python
+from cases
+where status == "open"
+pivot band in ["critical", "high", "low"] by operator:
+    open = count()
+sort operator
+```
+
+```sql
+SELECT operator, count(*) FILTER (WHERE band = $1) AS critical, count(*) FILTER (WHERE band = $2) AS high, count(*) FILTER (WHERE band = $3) AS low
+FROM cases
+WHERE status = $4
+GROUP BY operator
+ORDER BY operator
+-- parameters: ["critical", "high", "low", "open"]
+```
+
+The values are written out, so the columns are known before the query runs. With one total, each column is named by
+its value; with several, by the value and the total's name: `critical_open`, `critical_riskiest`. With no `by`, the
+totals are of every row, in one row.
+
+```python
+from cases
+pivot band in ["critical", "high"]:
+    open = count(where=status == "open")
+    riskiest = max(risk)
+```
+
+```sql clickhouse
+SELECT countIf(status = {p1:String} AND band = {p2:String}) AS critical_open, maxIfOrNull(risk, band = {p3:String}) AS critical_riskiest, countIf(status = {p4:String} AND band = {p5:String}) AS high_open, maxIfOrNull(risk, band = {p6:String}) AS high_riskiest
+FROM cases
+-- parameters: ["open", "critical", "critical", "open", "high", "high"]
+```
