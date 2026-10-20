@@ -555,11 +555,10 @@ fn run_sqlite(
 }
 
 /// A PostgreSQL connection with the tables made in a schema of its own, when `BCQL_POSTGRES_URL` names a database.
-fn postgres(test: &str) -> Option<postgres::Client> {
+fn postgres(schema: &str) -> Option<postgres::Client> {
     let url = std::env::var("BCQL_POSTGRES_URL").ok()?;
     let mut client =
         postgres::Client::connect(&url, postgres::NoTls).expect("PostgreSQL can be reached");
-    let schema = format!("bcql_{test}_{}", std::process::id());
     client
         .batch_execute(&format!(
             "DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema}; SET search_path TO {schema};\n{};",
@@ -849,15 +848,38 @@ fn shown(rows: &[Vec<Cell>]) -> String {
 struct Databases {
     lite: rusqlite::Connection,
     pg: Option<postgres::Client>,
+    /// The PostgreSQL schema the tables are made in.
+    schema: String,
     duck: Option<DuckDb>,
     click: Option<ClickHouse>,
 }
 
+impl Drop for Databases {
+    /// The tables were made for the test alone, and go with it: a database the tests run on is left as it was.
+    fn drop(&mut self) {
+        if let Some(client) = &mut self.pg {
+            let _ = client.batch_execute(&format!(
+                "SET search_path TO public; DROP SCHEMA IF EXISTS {} CASCADE",
+                self.schema
+            ));
+        }
+        if let Some(click) = &self.click {
+            let _ = click.send(
+                &format!("DROP DATABASE IF EXISTS {}", click.database),
+                &[],
+                false,
+            );
+        }
+    }
+}
+
 impl Databases {
     fn connect(test: &str) -> Databases {
+        let schema = format!("bcql_{test}_{}", std::process::id());
         Databases {
             lite: sqlite(),
-            pg: postgres(test),
+            pg: postgres(&schema),
+            schema,
             duck: DuckDb::connect(),
             click: ClickHouse::connect(test),
         }
