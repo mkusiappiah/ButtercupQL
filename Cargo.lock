@@ -67,6 +67,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "buttercupql-wasm"
+version = "0.0.1"
+dependencies = [
+ "bcql",
+ "buttercupql",
+]
+
+[[package]]
 name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

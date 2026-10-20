@@ -14,10 +14,10 @@ use buttercupql::ast::{self, ExprKind, ImportKind, Item, StepKind};
 use buttercupql::builtins::{self, Builtin};
 use buttercupql::{
     Column, Diagnostic, Dialect, FileLoader, Loader, ModuleName, Options, Param, Schema, Severity,
-    SourceFile, SourceText, Span, Table, Value,
+    SourceFile, SourceText, Span, Table,
 };
 
-use crate::json::{Json, object};
+use crate::json::{self, Json, object};
 
 const PARSE_ERROR: i64 = -32700;
 const INVALID_REQUEST: i64 = -32600;
@@ -1152,7 +1152,7 @@ impl Server {
                         .params
                         .iter()
                         .map(|param| match param {
-                            Param::Value(value) => value_json(value),
+                            Param::Value(value) => json::value(value),
                             Param::Arg(name) => object([("arg", name.as_str().into())]),
                         })
                         .collect::<Vec<_>>()
@@ -1167,7 +1167,7 @@ impl Server {
                             object([
                                 ("name", arg.name.as_str().into()),
                                 ("type", arg.ty.describe().into()),
-                                ("default", arg.default.as_ref().map(value_json).into()),
+                                ("default", arg.default.as_ref().map(json::value).into()),
                             ])
                         })
                         .collect::<Vec<_>>()
@@ -1489,17 +1489,6 @@ fn table_item(table: &Table) -> Json {
 
 fn column_item(column: &Column) -> Json {
     item(&column.name, FIELD, &column_detail(column), "")
-}
-
-/// A value for a placeholder, as JSON.
-fn value_json(value: &Value) -> Json {
-    match value {
-        Value::Null => Json::Null,
-        Value::Bool(value) => Json::Bool(*value),
-        Value::Int(value) => Json::from(*value),
-        Value::Float(value) => Json::from(*value),
-        Value::Text(text) => Json::from(text.as_str()),
-    }
 }
 
 fn link_item(link: &str, column: &Column) -> Json {

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- The playground: ButtercupQL compiled in the browser, built for WebAssembly (`crates/wasm`, 454 KB). It shows the SQL
+  for each database as you type, underlines each mistake with its message, compiles a query `def` on its own with
+  its arguments, checks names against a schema, and shares a query as a link.
 - `bcql lsp`, a language server. It shows each problem as it is typed, a problem in an imported module on the import
   that reads it; completes steps, functions, methods, the file's own definitions and, with a schema, tables, columns
   and links; describes them on hover; goes to a definition, in another module too; lists a file's definitions; and

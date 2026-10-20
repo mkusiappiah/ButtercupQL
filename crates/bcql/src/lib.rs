@@ -1,6 +1,7 @@
 //! `bcql`, the ButtercupQL command, as a library: the `bcql` program and the Python package both run it.
 
-mod json;
+#[doc(hidden)]
+pub mod json;
 mod lsp;
 
 use std::io::{self, IsTerminal, Read};

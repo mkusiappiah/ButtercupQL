@@ -1,0 +1,7 @@
+# Each payment beside its operator's running total, and its share of the operator's money
+from transactions
+where time > now() - days(30)
+so_far = sum(amount, over=operator, sort=time)
+share = amount / sum(amount, over=operator)
+sort operator, time
+select operator, time, amount, so_far, share

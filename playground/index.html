@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ButtercupQL Playground</title>
+  <meta name="description" content="Write a ButtercupQL query and see the SQL it compiles to for PostgreSQL, SQLite, DuckDB and ClickHouse, in your browser.">
+  <link rel="icon" href="buttercup.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="playground.css">
+</head>
+<body>
+  <header class="bar">
+    <a class="brand" href="./">
+      <img src="buttercup.svg" alt="" width="28" height="28">
+      <span>ButtercupQL <span class="muted">Playground</span></span>
+    </a>
+    <div class="controls">
+      <label>
+        <span>Database</span>
+        <select id="dialect">
+          <option value="postgres">PostgreSQL</option>
+          <option value="sqlite">SQLite</option>
+          <option value="duckdb">DuckDB</option>
+          <option value="clickhouse">ClickHouse</option>
+        </select>
+      </label>
+      <label>
+        <span>Example</span>
+        <select id="example"></select>
+      </label>
+      <button id="share" type="button" title="Copy a link to this query">Share</button>
+    </div>
+    <nav class="links">
+      <a href="../">Documentation</a>
+      <a href="https://github.com/mkusiappiah/ButtercupQL">GitHub</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="pane" aria-labelledby="query-title">
+      <div class="pane-head">
+        <h2 id="query-title">ButtercupQL</h2>
+        <span class="hint">One step per line, in the order the data flows</span>
+      </div>
+      <div class="editor" id="query-editor">
+        <div class="gutter" aria-hidden="true"></div>
+        <div class="code">
+          <pre class="layer highlight" aria-hidden="true"></pre>
+          <pre class="layer marks" aria-hidden="true"></pre>
+          <textarea id="query" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="ButtercupQL query"></textarea>
+        </div>
+      </div>
+      <details class="schema" id="schema-box">
+        <summary>Schema <span class="muted" id="schema-summary"></span></summary>
+        <p class="hint">The database's <code>CREATE TABLE</code> statements. Names are checked against them, and a column
+          that <code>REFERENCES</code> a table is followed with a dot: <code>account.operator</code>. Clear it to compile
+          without one.</p>
+        <textarea id="schema" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Schema"></textarea>
+      </details>
+    </section>
+
+    <section class="pane" aria-labelledby="sql-title">
+      <div class="pane-head">
+        <h2 id="sql-title">SQL</h2>
+        <label class="query-choice" id="query-choice" hidden>
+          <span>Compile</span>
+          <select id="query-name"></select>
+        </label>
+        <button id="copy" type="button" title="Copy the SQL">Copy</button>
+      </div>
+      <div class="output" id="output" aria-live="polite">
+        <pre id="sql" class="sql"></pre>
+        <div id="params"></div>
+        <div id="problems"></div>
+      </div>
+      <p class="status" id="status">Loading the compiler…</p>
+    </section>
+  </main>
+
+  <footer>
+    <p>The compiler runs in your browser, built for WebAssembly: nothing you write leaves this page. ButtercupQL is by
+      Michael Kusi-Appiah, under the MIT or Apache-2.0 licence.</p>
+  </footer>
+  <script src="playground.js"></script>
+</body>
+</html>

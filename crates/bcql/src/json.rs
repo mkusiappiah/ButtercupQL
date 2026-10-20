@@ -1,7 +1,9 @@
 //! JSON, as the command writes it and the language server reads it: a small reader and writer, so that `bcql` needs
-//! no other crate.
+//! no other crate. The playground's WebAssembly build writes its answers with it too.
 
 use std::fmt::{self, Write};
+
+use buttercupql::Value;
 
 /// A JSON value. An object keeps its fields in the order they were written.
 #[derive(Debug, Clone, PartialEq)]
@@ -176,6 +178,17 @@ impl fmt::Display for Json {
                 f.write_char('}')
             }
         }
+    }
+}
+
+/// A value for a placeholder, as JSON.
+pub fn value(value: &Value) -> Json {
+    match value {
+        Value::Null => Json::Null,
+        Value::Bool(value) => Json::Bool(*value),
+        Value::Int(value) => Json::from(*value),
+        Value::Float(value) => Json::from(*value),
+        Value::Text(text) => Json::from(text.as_str()),
     }
 }
 

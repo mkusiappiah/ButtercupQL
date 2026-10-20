@@ -1,0 +1,18 @@
+[package]
+name = "buttercupql-wasm"
+description = "ButtercupQL built for WebAssembly, for the playground in the browser."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+bcql = { path = "../bcql" }
+buttercupql = { path = "../buttercupql" }

@@ -10,3 +10,11 @@ authors = ["Michael Kusi-Appiah <appiah.michael@yahoo.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/mkusiappiah/ButtercupQL"
 homepage = "https://github.com/mkusiappiah/ButtercupQL"
+
+# The playground's WebAssembly build: small, as a browser downloads it.
+[profile.wasm]
+inherits = "release"
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

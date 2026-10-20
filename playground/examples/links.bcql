@@ -1,0 +1,7 @@
+# Open cases for each operator, read through the account each case points to: the compiler writes the join
+from cases
+where status == "open"
+group by operator = account.operator:
+    open = count()
+    riskiest = max(risk)
+sort -open
