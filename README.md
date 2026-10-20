@@ -219,8 +219,8 @@ where a name is defined, in an imported module too.
 - **VS Code:** the extension in [editors/vscode](editors/vscode) adds colours and **Show SQL**, the SQL of the query
   beside the file, kept up to date as you type. Each [release](https://github.com/mkusiappiah/ButtercupQL/releases)
   has it for each platform, with `bcql` in it: install the `.vsix` with `code --install-extension`.
-- **Other editors:** run `bcql lsp` for `.bcql` files. It takes the settings `{"dialect": "sqlite", "schema":
-  "schema.sql"}`, when it starts or when they change.
+- **Other editors:** run `bcql lsp` for `.bcql` files. It takes the settings
+  `{"dialect": "sqlite", "schema": "schema.sql"}`, when it starts or when they change.
 
 ## Using it from Python
 

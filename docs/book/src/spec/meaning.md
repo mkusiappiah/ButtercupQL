@@ -23,8 +23,9 @@ no schema says is of a kind not known, and is taken as it is.
 
 A number written in a text is a whole number, or a fraction when it has a point or an exponent; a string is text;
 `True` and `False` are truths; `None` is the missing value. Text written in a query is passed to the database as a
-parameter, never written into its SQL; numbers, truths, dates and times are written into it. Where a database takes
-no parameters, as in a table's default or a stored `def`, text is written into the SQL too, its quotes doubled.
+parameter, never written into its SQL, unless `literal()` asks for it there; numbers, truths, dates and times are
+written into it. Where a database takes no parameters, as in a table's default or a stored `def`, text is written
+into the SQL too, its quotes doubled.
 
 ### Numbers
 
@@ -57,8 +58,8 @@ date or a time, as numbers, and `.date()` is the day of a date and time. Dates a
 - **A comparison with a missing value is neither true nor false**, as in SQL, and so are `not` of it and an `and`
   or an `or` that it decides. A `where` keeps a row only when its condition is true.
 - `x == None` and `x is None` hold when `x` is missing; `x != None` and `x is not None` when it is not.
-- `x in [a, b]` holds when `x` is one of the values; with `None` among them, when `x` is missing too. `x not in [a,
-  b]` holds when `x` is there and is none of them, `None` among them or not.
+- `x in [a, b]` holds when `x` is one of the values; with `None` among them, when `x` is missing too.
+  `x not in [a, b]` holds when `x` is there and is none of them, `None` among them or not.
 - Arithmetic, text and dates made from a missing value are missing.
 - Missing values sort last, high to low and low to high.
 
@@ -137,8 +138,8 @@ different values. `sum(x)`, `mean(x)`, which `avg(x)` is too, `min(x)` and `max(
 `any(condition)` says whether the condition is true on some row, and `all(condition)` whether on every row.
 
 Of no rows, or no values, `count()` and `sum()` are `0`, `any()` is `False` and `all()` is `True`, as in Python;
-`mean()`, `min()` and `max()` are missing. Each total takes `where=`, a condition of its own: `count(where=status ==
-"open")` counts the open rows alone. A total in a block can read the totals before it.
+`mean()`, `min()` and `max()` are missing. Each total takes `where=`, a condition of its own:
+`count(where=status == "open")` counts the open rows alone. A total in a block can read the totals before it.
 
 ## Window functions
 
@@ -165,15 +166,15 @@ followed once in a query, keeping every row: a row whose link leads nowhere has 
 **A value**, `name = value`, is worked out once, with no rows: a number, a text or a date, or a value made from them.
 **A named query**, `name = (from ...)`, is read by `from` and `join` where it is named, and in other queries.
 
-**A `def`** whose body starts with `from` is a query, read by `from` and `join` where it is called: `from
-cases_for("A1")`. Otherwise its body is steps, put in place where it is called on a line of a query. A parameter takes
-the argument given in its place or by its name, and its default when none is. Compiled on its own, a query `def`'s
-parameters are left as placeholders, given values when the query runs. A `def` whose steps change rows is called on
-a line of its own, as a statement.
+**A `def`** whose body starts with `from` is a query, read by `from` and `join` where it is called:
+`from cases_for("A1")`. Otherwise its body is steps, put in place where it is called on a line of a query. A
+parameter takes the argument given in its place or by its name, and its default when none is. Compiled on its own, a
+query `def`'s parameters are left as placeholders, given values when the query runs. A `def` whose steps change rows
+is called on a line of its own, as a statement.
 
-**An import** reads another file's definitions: `import shared` makes them `shared.name`, and `from shared import
-recent` makes `recent` one of the text's own names. A module is found by its dotted name, from the text's own folder,
-or from its own with `from . import`.
+**An import** reads another file's definitions: `import shared` makes them `shared.name`, and
+`from shared import recent` makes `recent` one of the text's own names. A module is found by its dotted name, from
+the text's own folder, or from its own with `from . import`.
 
 ## Combining queries
 

@@ -87,9 +87,9 @@ bytes, is refused.
 
 ## Operators and brackets
 
-The operators are `+ - * / // % **`, `== != < <= > >=`, `=` and the operators that give a value where it is, `+=
--= *= /= //= %= **=`, `->`, `.`, `,`, `:` and `;`. Between two queries, `|` and `&` combine them. `@` starts a
-decorator at the start of a line.
+The operators are `+ - * / // % **`, `== != < <= > >=`, `=` and the operators that give a value where it is,
+`+= -= *= /= //= %= **=`, then `->`, `.`, `,`, `:` and `;`. Between two queries, `|` and `&` combine them. `@` starts
+a decorator at the start of a line.
 
 The other languages' ways of writing these, `&&`, `||`, `!`, `<>`, `~` and `:=`, are each refused with ButtercupQL's
 way: `and`, `or`, `not`, `!=`.
