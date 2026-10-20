@@ -446,7 +446,7 @@ fn check(
         text: text.to_string(),
     });
     let parsed = core::parse(text);
-    if parsed.has_errors() || parsed.file.query.is_none() {
+    if parsed.has_errors() || parsed.file.statements.is_empty() {
         return Ok(parsed
             .diagnostics
             .into_iter()

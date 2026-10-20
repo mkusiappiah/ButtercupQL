@@ -56,9 +56,94 @@ impl ParamStyle {
     }
 }
 
+/// A statement, as it is written for a database. A statement lives only while it is written, so its `SELECT`
+/// is kept in place rather than boxed.
+#[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum Statement {
+    /// A query that gives rows.
+    Select(Select),
+    /// `UPDATE table SET column = value WHERE ...`.
+    Update {
+        table: Vec<String>,
+        set: Vec<(String, Expr)>,
+        filter: Vec<Expr>,
+        returning: Vec<Item>,
+    },
+    /// `DELETE FROM table WHERE ...`.
+    Delete {
+        table: Vec<String>,
+        filter: Vec<Expr>,
+        returning: Vec<Item>,
+    },
+    /// `INSERT INTO table (columns) SELECT ...`, or `... VALUES (...)`.
+    Insert {
+        table: Vec<String>,
+        columns: Vec<String>,
+        rows: Rows,
+        returning: Vec<Item>,
+    },
+    /// A statement the compiler wrote out whole, with no placeholders: `CREATE TABLE`, `GRANT`.
+    Written(String),
+    /// `BEGIN`: the statements after it run together, until `COMMIT`.
+    Begin,
+    /// `COMMIT`.
+    Commit,
+}
+
+/// The rows an `INSERT` adds.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Rows {
+    /// The rows of a query.
+    Query(Box<Select>),
+    /// Rows written in the query, each its values in the order of the columns.
+    Values(Vec<Vec<Expr>>),
+}
+
+/// How the rows of two queries are combined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SetOp {
+    /// Every row of both: `+`.
+    UnionAll,
+    /// The rows of both, repeats dropped: `|`.
+    Union,
+    /// The rows in both: `&`.
+    Intersect,
+    /// The rows of the first that are not in the second: `-`.
+    Except,
+}
+
+impl SetOp {
+    fn keyword(self, dialect: Dialect) -> &'static str {
+        // ClickHouse says which it means, as its own defaults differ.
+        match (self, dialect) {
+            (SetOp::UnionAll, _) => "UNION ALL",
+            (SetOp::Union, Dialect::ClickHouse) => "UNION DISTINCT",
+            (SetOp::Union, _) => "UNION",
+            (SetOp::Intersect, Dialect::ClickHouse) => "INTERSECT DISTINCT",
+            (SetOp::Intersect, _) => "INTERSECT",
+            (SetOp::Except, Dialect::ClickHouse) => "EXCEPT DISTINCT",
+            (SetOp::Except, _) => "EXCEPT",
+        }
+    }
+}
+
+/// A recursive query: `WITH RECURSIVE name AS (anchor UNION step)`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Cte {
+    pub(crate) name: String,
+    /// The rows it starts with.
+    pub(crate) anchor: Box<Select>,
+    pub(crate) op: SetOp,
+    /// The rows each round adds, from the rows of the round before.
+    pub(crate) step: Box<Select>,
+}
+
 /// A `SELECT` statement.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct Select {
+    /// The recursive queries it reads: `WITH RECURSIVE`.
+    pub(crate) with: Vec<Cte>,
     pub(crate) distinct: bool,
     /// The columns. None means `*`.
     pub(crate) columns: Vec<Item>,
@@ -88,7 +173,8 @@ impl Select {
     pub(crate) fn has_left_join(&self) -> bool {
         let inside = |source: &Source| match &source.kind {
             SourceKind::Query(select) => select.has_left_join(),
-            SourceKind::Table(_) => false,
+            SourceKind::Compound(left, _, right) => left.has_left_join() || right.has_left_join(),
+            SourceKind::Table(_) | SourceKind::Rows(..) => false,
         };
         self.joins
             .iter()
@@ -129,6 +215,10 @@ pub(crate) enum SourceKind {
     Table(Vec<String>),
     /// A query in brackets.
     Query(Box<Select>),
+    /// The rows of two queries, combined: `(SELECT ... UNION ALL SELECT ...)`.
+    Compound(Box<Select>, SetOp, Box<Select>),
+    /// Rows written in the query, each its values, and the columns' names.
+    Rows(Vec<Vec<Expr>>, Vec<String>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -343,33 +433,77 @@ pub(crate) struct Written {
     pub(crate) names: Vec<String>,
 }
 
-/// Writes a statement as text for a database.
+/// Writes a query as text for a database.
+#[cfg(test)]
 pub(crate) fn write(select: &Select, dialect: Dialect, style: ParamStyle) -> Written {
-    let mut writer = Writer {
-        dialect,
-        style,
-        out: String::new(),
-        params: Vec::new(),
-        names: Vec::new(),
-        values: 0,
-        numbered: HashMap::new(),
-        qualified: false,
-    };
-    writer.select(select, 0);
-    if !select.settings.is_empty() {
-        let settings: Vec<String> = select
-            .settings
-            .iter()
-            .map(|(name, value)| format!("{name} = {value}"))
-            .collect();
-        writer.line(0);
-        writer.push(&format!("SETTINGS {}", settings.join(", ")));
-    }
+    write_statement(&Statement::Select(select.clone()), dialect, style)
+}
+
+/// Writes a statement as text for a database.
+pub(crate) fn write_statement(
+    statement: &Statement,
+    dialect: Dialect,
+    style: ParamStyle,
+) -> Written {
+    let mut writer = Writer::new(dialect, style);
+    writer.statement(statement);
     Written {
         sql: writer.out,
         params: writer.params,
         names: writer.names,
     }
+}
+
+/// How the arguments of a query `def` are written.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Args {
+    /// As placeholders, given when the query runs.
+    Placeholders,
+    /// By name, after the name of the function they belong to: PostgreSQL's `cases_for.account`.
+    Qualified(String),
+    /// By name alone: DuckDB's macros.
+    Bare,
+}
+
+/// Writes a statement with every value written into it, as the body of a stored function or the default of a
+/// column is: neither can have placeholders.
+pub(crate) fn write_inline(statement: &Statement, dialect: Dialect, args: Args) -> String {
+    let mut writer = Writer::new(dialect, ParamStyle::of(dialect));
+    writer.inline = true;
+    writer.args = args;
+    writer.statement(statement);
+    writer.out
+}
+
+/// Writes a value with everything in it written in, for a column's default or an index's condition.
+pub(crate) fn write_expr_inline(expr: &Expr, dialect: Dialect) -> String {
+    let mut writer = Writer::new(dialect, ParamStyle::of(dialect));
+    writer.inline = true;
+    writer.expr(expr, 0, 0);
+    writer.out
+}
+
+/// A name, quoted if it must be.
+pub(crate) fn ident(name: &str) -> String {
+    if needs_quotes(name) {
+        format!("\"{}\"", name.replace('"', "\"\""))
+    } else {
+        name.to_string()
+    }
+}
+
+/// A table's name and its schema's: `analytics.daily`.
+pub(crate) fn path(parts: &[String]) -> String {
+    parts
+        .iter()
+        .map(|part| ident(part))
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+/// A string written into SQL, its quotes doubled.
+pub(crate) fn literal(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "''"))
 }
 
 struct Writer {
@@ -384,9 +518,181 @@ struct Writer {
     numbered: HashMap<String, usize>,
     /// Whether the statement being written reads more than one table.
     qualified: bool,
+    /// Whether values are written into the SQL, rather than as placeholders.
+    inline: bool,
+    /// How a `def`'s arguments are written.
+    args: Args,
 }
 
 impl Writer {
+    fn new(dialect: Dialect, style: ParamStyle) -> Writer {
+        Writer {
+            dialect,
+            style,
+            out: String::new(),
+            params: Vec::new(),
+            names: Vec::new(),
+            values: 0,
+            numbered: HashMap::new(),
+            qualified: false,
+            inline: false,
+            args: Args::Placeholders,
+        }
+    }
+
+    fn statement(&mut self, statement: &Statement) {
+        match statement {
+            Statement::Select(select) => {
+                self.select(select, 0);
+                self.settings(&select.settings);
+            }
+            Statement::Update {
+                table,
+                set,
+                filter,
+                returning,
+            } => {
+                if self.dialect == Dialect::ClickHouse {
+                    // ClickHouse changes rows with a mutation of the table, which it finishes before it answers.
+                    self.push("ALTER TABLE ");
+                    self.push(&path(table));
+                    self.push(" UPDATE ");
+                    self.assignments(set);
+                    self.line(0);
+                    self.push("WHERE ");
+                    if filter.is_empty() {
+                        self.push("true");
+                    } else {
+                        self.conditions(filter, 0);
+                    }
+                    self.settings(&[("mutations_sync", "1")]);
+                    return;
+                }
+                self.push("UPDATE ");
+                self.push(&path(table));
+                self.push(" SET ");
+                self.assignments(set);
+                if !filter.is_empty() {
+                    self.line(0);
+                    self.push("WHERE ");
+                    self.conditions(filter, 0);
+                }
+                self.returning(returning);
+            }
+            Statement::Delete {
+                table,
+                filter,
+                returning,
+            } => {
+                self.push("DELETE FROM ");
+                self.push(&path(table));
+                if !filter.is_empty() {
+                    self.line(0);
+                    self.push("WHERE ");
+                    self.conditions(filter, 0);
+                } else if self.dialect == Dialect::ClickHouse {
+                    // ClickHouse deletes only the rows a condition chooses.
+                    self.line(0);
+                    self.push("WHERE true");
+                }
+                self.returning(returning);
+            }
+            Statement::Insert {
+                table,
+                columns,
+                rows,
+                returning,
+            } => {
+                self.push("INSERT INTO ");
+                self.push(&path(table));
+                if !columns.is_empty() {
+                    let names: Vec<String> = columns.iter().map(|name| ident(name)).collect();
+                    self.push(&format!(" ({})", names.join(", ")));
+                }
+                self.line(0);
+                match rows {
+                    Rows::Query(select) => self.select(select, 0),
+                    Rows::Values(values) => {
+                        self.push("VALUES ");
+                        for (n, row) in values.iter().enumerate() {
+                            if n > 0 {
+                                self.push(", ");
+                            }
+                            self.push("(");
+                            for (m, value) in row.iter().enumerate() {
+                                if m > 0 {
+                                    self.push(", ");
+                                }
+                                self.expr(value, 0, 0);
+                            }
+                            self.push(")");
+                        }
+                    }
+                }
+                self.returning(returning);
+            }
+            Statement::Written(sql) => self.out.push_str(sql),
+            Statement::Begin => self.push("BEGIN"),
+            Statement::Commit => self.push("COMMIT"),
+        }
+    }
+
+    fn assignments(&mut self, set: &[(String, Expr)]) {
+        for (n, (column, value)) in set.iter().enumerate() {
+            if n > 0 {
+                self.push(", ");
+            }
+            self.ident(column);
+            self.push(" = ");
+            self.expr(value, 0, 0);
+        }
+    }
+
+    fn returning(&mut self, returning: &[Item]) {
+        if returning.is_empty() {
+            return;
+        }
+        self.line(0);
+        self.push("RETURNING ");
+        self.items(returning, 0);
+    }
+
+    fn settings(&mut self, settings: &[(&str, &str)]) {
+        if settings.is_empty() {
+            return;
+        }
+        let settings: Vec<String> = settings
+            .iter()
+            .map(|(name, value)| format!("{name} = {value}"))
+            .collect();
+        self.line(0);
+        self.push(&format!("SETTINGS {}", settings.join(", ")));
+    }
+
+    /// The recursive queries a `SELECT` reads, before it.
+    fn with(&mut self, with: &[Cte], depth: usize) {
+        if with.is_empty() {
+            return;
+        }
+        self.push("WITH RECURSIVE ");
+        for (n, cte) in with.iter().enumerate() {
+            if n > 0 {
+                self.push(", ");
+            }
+            self.ident(&cte.name);
+            self.push(" AS (");
+            self.line(depth + 1);
+            self.select(&cte.anchor, depth + 1);
+            self.line(depth + 1);
+            self.push(cte.op.keyword(self.dialect));
+            self.line(depth + 1);
+            self.select(&cte.step, depth + 1);
+            self.line(depth);
+            self.push(")");
+        }
+        self.line(depth);
+    }
+
     /// Writes SQL the compiler made. With `%s` placeholders, a `%` is doubled so that it is not taken for one.
     fn push(&mut self, text: &str) {
         if self.style == ParamStyle::Format && text.contains('%') {
@@ -404,6 +710,7 @@ impl Writer {
     }
 
     fn select(&mut self, select: &Select, depth: usize) {
+        self.with(&select.with, depth);
         let outer = std::mem::replace(&mut self.qualified, select.qualified());
         self.push(if select.distinct {
             "SELECT DISTINCT "
@@ -413,7 +720,13 @@ impl Writer {
         if select.columns.is_empty() {
             self.push("*");
         }
-        for (n, item) in select.columns.iter().enumerate() {
+        self.items(&select.columns, depth);
+        self.clauses(select, depth);
+        self.qualified = outer;
+    }
+
+    fn items(&mut self, items: &[Item], depth: usize) {
+        for (n, item) in items.iter().enumerate() {
             if n > 0 {
                 self.push(", ");
             }
@@ -436,6 +749,10 @@ impl Writer {
                 }
             }
         }
+    }
+
+    /// The clauses of a `SELECT` after its columns.
+    fn clauses(&mut self, select: &Select, depth: usize) {
         if let Some(from) = &select.from {
             self.line(depth);
             self.push("FROM ");
@@ -502,7 +819,6 @@ impl Writer {
             }
             (None, None) => {}
         }
-        self.qualified = outer;
     }
 
     fn order(&mut self, order: &[Order], depth: usize) {
@@ -555,6 +871,38 @@ impl Writer {
                 self.line(depth);
                 self.push(")");
             }
+            SourceKind::Compound(left, op, right) => {
+                self.push("(");
+                self.line(depth + 1);
+                self.select(left, depth + 1);
+                self.line(depth + 1);
+                self.push(op.keyword(self.dialect));
+                self.line(depth + 1);
+                self.select(right, depth + 1);
+                self.line(depth);
+                self.push(")");
+            }
+            SourceKind::Rows(rows, columns) => {
+                // `SELECT ... UNION ALL SELECT ...` names the columns the same way on every database.
+                self.push("(");
+                for (n, row) in rows.iter().enumerate() {
+                    self.line(depth + 1);
+                    if n > 0 {
+                        self.push("UNION ALL ");
+                    }
+                    self.push("SELECT ");
+                    for (m, (value, column)) in row.iter().zip(columns).enumerate() {
+                        if m > 0 {
+                            self.push(", ");
+                        }
+                        self.expr(value, 0, depth + 1);
+                        self.push(" AS ");
+                        self.ident(column);
+                    }
+                }
+                self.line(depth);
+                self.push(")");
+            }
         }
         if let Some(alias) = &source.alias {
             let same =
@@ -581,6 +929,36 @@ impl Writer {
     }
 
     fn param(&mut self, param: &Param, ty: Type) {
+        if self.inline {
+            match param {
+                Param::Value(value) => {
+                    let written = match value {
+                        Value::Null => "NULL".to_string(),
+                        Value::Bool(true) => "TRUE".to_string(),
+                        Value::Bool(false) => "FALSE".to_string(),
+                        Value::Int(number) => number.to_string(),
+                        Value::Float(number) => format!("{number:?}"),
+                        Value::Text(text) => literal(text),
+                    };
+                    self.push(&written);
+                    return;
+                }
+                Param::Arg(name) => match self.args.clone() {
+                    Args::Qualified(function) => {
+                        self.ident(&function);
+                        self.push(".");
+                        self.ident(name);
+                        return;
+                    }
+                    Args::Bare => {
+                        self.ident(name);
+                        return;
+                    }
+                    // ClickHouse's stored queries take their arguments as its own placeholders.
+                    Args::Placeholders => {}
+                },
+            }
+        }
         let name = match param {
             Param::Value(_) => {
                 self.values += 1;

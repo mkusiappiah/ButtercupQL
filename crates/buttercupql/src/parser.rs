@@ -16,7 +16,7 @@ use crate::suggest;
 mod tests;
 
 /// The words that start a step.
-pub(crate) const STEP_WORDS: [&str; 12] = [
+pub(crate) const STEP_WORDS: [&str; 16] = [
     "from",
     "where",
     "select",
@@ -29,7 +29,16 @@ pub(crate) const STEP_WORDS: [&str; 12] = [
     "summarize",
     "join",
     "left",
+    "update",
+    "delete",
+    "insert",
+    "pivot",
 ];
+
+/// The words that start a statement that is not a query: a change to the database itself.
+#[cfg(test)]
+pub(crate) const STATEMENT_WORDS: [&str; 6] =
+    ["create", "alter", "drop", "grant", "revoke", "with"];
 
 /// Words from SQL and from data-frame libraries, the step that does their work in ButtercupQL, and an example.
 const OTHER_STEPS: [(&str, &str, &str); 18] = [
@@ -59,6 +68,12 @@ const OTHER_STEPS: [(&str, &str, &str); 18] = [
 
 /// A problem was found and reported. The parser starts again at the next step.
 struct Fail;
+
+/// A line of `create table`.
+enum TableLine {
+    Column(ColumnDef),
+    Key(TableKey),
+}
 
 type Parse<X> = Result<X, Fail>;
 
@@ -373,6 +388,74 @@ impl<'a> Parser<'a> {
         // The first line sets the column, so a query indented inside a Python string reads as it is.
         self.block = first.col;
         file.docstring = self.docstring();
+        // Imports come first.
+        loop {
+            let token = self.tok();
+            if token.kind == T::Semicolon {
+                self.bump();
+                continue;
+            }
+            let import =
+                token.kind == T::Import || (token.kind == T::From && self.is_from_import());
+            if !import {
+                break;
+            }
+            if token.line_start {
+                self.line_belongs(token, End::File);
+            }
+            let start = self.pos;
+            self.line_head = start;
+            let read = if token.kind == T::Import {
+                self.import()
+                    .map(|imports| file.items.extend(imports.into_iter().map(Item::Import)))
+            } else {
+                self.import_from()
+                    .map(|import| file.items.push(Item::Import(import)))
+            };
+            match read {
+                Ok(()) => self.end_of_step(),
+                Err(Fail) => self.recover(start),
+            }
+        }
+        // Then the definitions and what the file does, in order.
+        file.statements = self.statements(End::File, &mut file.items, false);
+        file.query = self.main_query(&file.statements);
+        file
+    }
+
+    /// The query that gives the file's rows: a query that changes none. A file gives the rows of one query.
+    fn main_query(&mut self, statements: &[Statement]) -> Option<Query> {
+        fn reads<'s>(statements: &'s [Statement], found: &mut Vec<&'s Query>) {
+            for statement in statements {
+                match &statement.kind {
+                    StatementKind::Query(query) if !query.changes() => found.push(query),
+                    StatementKind::Transaction(body) => reads(body, found),
+                    _ => {}
+                }
+            }
+        }
+        let mut found = Vec::new();
+        reads(statements, &mut found);
+        for second in found.iter().skip(1) {
+            let from = second.steps.first().map_or(second.span, |step| step.span);
+            self.note(
+                Diagnostic::error(from, "a query has one `from`")
+                    .with_label("this starts a second query that gives rows")
+                    .with_help("to add another table's columns, use `join`")
+                    .with_help("a file gives the rows of one query; to keep another for later, name it: `busy = (from ...)`"),
+            );
+        }
+        found.first().map(|query| (*query).clone())
+    }
+
+    /// The statements at the current column, to the end given, and the definitions among them.
+    fn statements(
+        &mut self,
+        end: End,
+        items: &mut Vec<Item>,
+        in_transaction: bool,
+    ) -> Vec<Statement> {
+        let mut statements = Vec::new();
         loop {
             let token = self.tok();
             if token.kind == T::Eof {
@@ -382,35 +465,701 @@ impl<'a> Parser<'a> {
                 self.bump();
                 continue;
             }
-            if token.line_start {
-                self.line_belongs(token, End::File);
+            if token.line_start && !self.line_belongs(token, end) {
+                break;
             }
             let start = self.pos;
             self.line_head = start;
             let next = self.nth(1);
             let read = match token.kind {
-                T::Import => self
-                    .import()
-                    .map(|imports| file.items.extend(imports.into_iter().map(Item::Import))),
-                T::From if self.is_from_import() => self
-                    .import_from()
-                    .map(|import| file.items.push(Item::Import(import))),
-                T::Def => self.def().map(|def| file.items.push(Item::Def(def))),
-                T::Name | T::QuotedName if next.kind == T::Assign && !next.line_start => self
-                    .top_let()
-                    .map(|value| file.items.push(Item::Let(value))),
+                T::Def => self.def(Vec::new()).map(|def| {
+                    items.push(Item::Def(def));
+                    None
+                }),
+                T::Other if self.text(token) == "@" => self.decorated(items),
+                T::Name | T::QuotedName if next.kind == T::Assign && !next.line_start => {
+                    self.top_let().map(|value| {
+                        items.push(Item::Let(value));
+                        None
+                    })
+                }
+                T::Import => Err(self.report(
+                    Diagnostic::error(
+                        token.span,
+                        "imports go at the top of the file, before the query",
+                    )
+                    .with_label("move this line up"),
+                )),
+                T::From if self.is_from_import() => Err(self.report(
+                    Diagnostic::error(
+                        token.span,
+                        "imports go at the top of the file, before the query",
+                    )
+                    .with_label("move this line up"),
+                )),
+                _ if self.starts_statement_word(token) => {
+                    self.statement_of_its_own(items, in_transaction).map(Some)
+                }
+                T::Name | T::QuotedName if self.is_call_alone() => self.call_statement().map(Some),
                 _ => {
-                    // The query: its steps run to the end of the file.
-                    file.query = Some(self.query(End::File));
-                    break;
+                    let query = self.query_statement(end);
+                    let span = query.span;
+                    statements.push(Statement {
+                        kind: StatementKind::Query(query),
+                        span,
+                    });
+                    continue;
                 }
             };
             match read {
-                Ok(()) => self.end_of_step(),
+                Ok(statement) => {
+                    statements.extend(statement);
+                    self.end_of_step();
+                }
                 Err(Fail) => self.recover(start),
             }
         }
-        file
+        statements
+    }
+
+    /// Whether the current token starts a statement of its own: a change to the database itself.
+    fn starts_statement_word(&self, token: Token) -> bool {
+        let next = self.nth(1);
+        let word = self.text(token);
+        match token.kind {
+            T::Reserved => {
+                word == "with" && next.kind == T::Name && self.text(next) == "transaction"
+            }
+            T::Name if next.line_start || matches!(next.kind, T::Assign | T::AugAssign) => false,
+            T::Name => match word {
+                "create" | "grant" | "revoke" => true,
+                "alter" => next.kind == T::Name && self.text(next) == "table",
+                "drop" => next.kind == T::Name && matches!(self.text(next), "table" | "index"),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// Whether the line is a call alone, `close_stale(90)`, rather than the start of a query.
+    fn is_call_alone(&self) -> bool {
+        if self.nth(1).kind != T::LParen && self.nth(1).kind != T::Dot {
+            return false;
+        }
+        // A call alone ends its line.
+        let mut depth = 0i32;
+        let mut n = 1;
+        loop {
+            let token = self.nth(n);
+            match token.kind {
+                T::Eof => return depth == 0,
+                T::LParen | T::LBracket | T::LBrace => depth += 1,
+                T::RParen | T::RBracket | T::RBrace => depth -= 1,
+                _ if token.line_start && depth <= 0 => return true,
+                T::Semicolon if depth == 0 => return true,
+                _ => {}
+            }
+            if depth < 0 {
+                return false;
+            }
+            n += 1;
+        }
+    }
+
+    /// A `def` called on a line of its own, outside a query: `close_stale(90)`.
+    fn call_statement(&mut self) -> Parse<Statement> {
+        let call = self.primary()?;
+        if !matches!(call.kind, ExprKind::Call(..)) {
+            return Err(self.report(
+                Diagnostic::error(call.span, "this is not a statement")
+                    .with_help("a query starts with `from` and a table; a `def` is called with brackets: `close_stale(90)`"),
+            ));
+        }
+        Ok(Statement {
+            span: call.span,
+            kind: StatementKind::Call(call),
+        })
+    }
+
+    /// A query that runs as a statement: its steps, to the next statement. A step that changes rows ends it, but
+    /// for a `select` after it, which gives the rows changed.
+    fn query_statement(&mut self, end: End) -> Query {
+        let first = self.tok();
+        let mut steps: Vec<Step> = Vec::new();
+        let mut changed = false;
+        loop {
+            let token = self.tok();
+            if token.kind == T::Eof || (matches!(end, End::Bracket(_)) && token.kind == T::RParen) {
+                break;
+            }
+            if token.kind == T::Semicolon {
+                self.bump();
+                continue;
+            }
+            if token.line_start && !self.line_belongs(token, end) {
+                break;
+            }
+            if !steps.is_empty() {
+                let next_statement = token.kind == T::From
+                    || token.kind == T::Def
+                    || token.kind == T::Import
+                    || (token.kind == T::Other && self.text(token) == "@")
+                    || self.starts_statement_word(token);
+                // After a change, a `select` gives the rows changed; anything else starts the next statement,
+                // and another step is a mistake.
+                let word = if token.kind == T::Name {
+                    self.text(token)
+                } else {
+                    ""
+                };
+                let assigns = matches!(self.nth(1).kind, T::Assign | T::AugAssign);
+                if changed
+                    && !next_statement
+                    && !assigns
+                    && word != "select"
+                    && word != "from"
+                    && STEP_WORDS.contains(&word)
+                {
+                    let start = self.pos;
+                    self.report(
+                        Diagnostic::error(token.span, "after a change, only a `select` can follow")
+                            .with_label("a `select` here gives the rows changed")
+                            .with_help("a new statement starts with `from` on a line of its own"),
+                    );
+                    self.recover(start);
+                    continue;
+                }
+                let after_change = changed && word != "select";
+                let defines = changed
+                    && matches!(token.kind, T::Name | T::QuotedName)
+                    && self.nth(1).kind == T::Assign;
+                if next_statement || after_change || defines {
+                    break;
+                }
+            }
+            let start = self.pos;
+            self.line_head = start;
+            match self.step() {
+                Ok(step) => {
+                    changed |= step.changes();
+                    steps.push(step);
+                    self.end_of_step();
+                }
+                Err(Fail) => self.recover(start),
+            }
+        }
+        self.check_from(first, &steps, true);
+        let span = match (steps.first(), steps.last()) {
+            (Some(first), Some(last)) => first.span.to(last.span),
+            _ => first.span,
+        };
+        Query { steps, span }
+    }
+
+    /// A `@stored` def: the decorator, and the `def` on the line after it.
+    fn decorated(&mut self, items: &mut Vec<Item>) -> Parse<Option<Statement>> {
+        let mut decorators = Vec::new();
+        while self.at_other("@") {
+            let at = self.bump();
+            let name = self.name("a decorator's name after `@`, such as `@stored`")?;
+            if name.text != "stored" {
+                self.note(
+                    Diagnostic::error(name.span, format!("there is no decorator `@{}`", name.text))
+                        .with_help(
+                            "`@stored` keeps a `def` in the database, as a function or a procedure",
+                        ),
+                );
+            }
+            if !self.at_end() {
+                let token = self.tok();
+                return Err(self.report(
+                    Diagnostic::error(token.span, "a decorator is alone on its line")
+                        .with_label("the `def` goes on the next line"),
+                ));
+            }
+            decorators.push(Name {
+                span: at.span.to(name.span),
+                text: name.text,
+            });
+            if !self.tok().line_start {
+                break;
+            }
+            // The next line, with another decorator or the `def`, is read as a line of its own.
+            self.line_head = self.pos;
+        }
+        if !self.at(T::Def) {
+            let (span, found) = self.found();
+            return Err(self.report(
+                Diagnostic::error(span, format!("expected a `def` after the decorator, found {found}"))
+                    .with_help("for example:\n\n    @stored\n    def cases_for(account: str):\n        from cases\n        where account_id == account"),
+            ));
+        }
+        let def = self.def(decorators)?;
+        let statement = def.is_stored().then(|| Statement {
+            span: def.span,
+            kind: StatementKind::Store(def.name.clone()),
+        });
+        items.push(Item::Def(def));
+        Ok(statement)
+    }
+
+    // ---- Statements of their own
+
+    /// `create ...`, `alter table ...`, `drop ...`, `grant ...`, `revoke ...` or `with transaction:`.
+    fn statement_of_its_own(
+        &mut self,
+        items: &mut Vec<Item>,
+        in_transaction: bool,
+    ) -> Parse<Statement> {
+        let token = self.tok();
+        match self.text(token) {
+            "create" => self.create(),
+            "alter" => self.alter_table(),
+            "drop" => self.drop_statement(),
+            "grant" | "revoke" => self.grant(),
+            _ => self.transaction(items, in_transaction),
+        }
+    }
+
+    fn create(&mut self) -> Parse<Statement> {
+        let keyword = self.bump();
+        if self.at_word("table") {
+            self.bump();
+            return self.create_table(keyword);
+        }
+        let unique = self.at_word("unique") && {
+            self.bump();
+            true
+        };
+        if self.at_word("index") {
+            self.bump();
+            return self.create_index(keyword, unique);
+        }
+        let (span, found) = self.found();
+        Err(self.report(
+            Diagnostic::error(
+                span,
+                format!("expected `table` or `index` after `create`, found {found}"),
+            )
+            .with_help("for example: `create table cases:`, or `create index on cases(-risk)`"),
+        ))
+    }
+
+    fn create_table(&mut self, keyword: Token) -> Parse<Statement> {
+        let name = self.path("the table's name after `create table`")?;
+        let options = self.options()?;
+        let Some(colon) = self.eat(T::Colon) else {
+            return Err(self.expected("`:`, and the table's columns on the lines after it"));
+        };
+        let lines = self.block(
+            colon,
+            "the table's columns",
+            "id: int = field(primary_key=True)",
+            |p| p.table_line(),
+        )?;
+        let mut columns = Vec::new();
+        let mut keys = Vec::new();
+        for line in lines {
+            match line {
+                TableLine::Column(column) => columns.push(column),
+                TableLine::Key(key) => keys.push(key),
+            }
+        }
+        let end = columns
+            .last()
+            .map(|column| column.span)
+            .into_iter()
+            .chain(keys.last().map(|key| key.span))
+            .max_by_key(|span| span.end)
+            .unwrap_or(colon.span);
+        let span = keyword.span.to(end);
+        Ok(Statement {
+            span,
+            kind: StatementKind::CreateTable(CreateTable {
+                name,
+                columns,
+                keys,
+                options,
+                span,
+            }),
+        })
+    }
+
+    /// A line of `create table`: a column, or `primary_key(a, b)` or `unique(a, b)`.
+    fn table_line(&mut self) -> Parse<TableLine> {
+        let token = self.tok();
+        let word = self.text(token);
+        if token.kind == T::Name
+            && matches!(word, "primary_key" | "unique")
+            && self.nth(1).kind == T::LParen
+        {
+            self.bump();
+            let open = self.bump();
+            let (columns, close) = self.inside(|p| {
+                let mut columns = Vec::new();
+                loop {
+                    if p.at(T::RParen) {
+                        break;
+                    }
+                    columns.push(p.name("a column of the key")?);
+                    if p.eat(T::Comma).is_none() {
+                        break;
+                    }
+                }
+                let close = p.close(open, T::RParen, "`,` or `)`")?;
+                Ok((columns, close))
+            })?;
+            return Ok(TableLine::Key(TableKey {
+                primary: word == "primary_key",
+                columns,
+                span: token.span.to(close.span),
+            }));
+        }
+        self.column_def().map(TableLine::Column)
+    }
+
+    /// A column: `name: type`, `| None` when it can be missing, and `= default` or `= field(...)`.
+    fn column_def(&mut self) -> Parse<ColumnDef> {
+        let name = self.name("a column's name")?;
+        if self.eat(T::Colon).is_none() {
+            let (span, found) = self.found();
+            return Err(self.report(
+                Diagnostic::error(
+                    span,
+                    format!("expected `:` and the column's type, found {found}"),
+                )
+                .with_help("a column is written as a Python annotation: `risk: int | None`"),
+            ));
+        }
+        let mut ty = self.type_expr()?;
+        let mut nullable = false;
+        let mut end = ty.span;
+        if self.at_other("|") {
+            let bar = self.bump();
+            if !self.at(T::None) {
+                return Err(self.report(
+                    Diagnostic::error(bar.span, "after `|`, a column's type takes `None`")
+                        .with_help("`str | None` is text that can be missing"),
+                ));
+            }
+            end = self.bump().span;
+            nullable = true;
+        }
+        let optional = ty.name.parts.len() == 1 && ty.name.parts[0].text == "Optional";
+        if optional && ty.args.len() == 1 {
+            ty = ty.args.remove(0);
+            nullable = true;
+        }
+        let mut default = None;
+        let mut field = Vec::new();
+        if let Some(equals) = self.eat(T::Assign) {
+            let value = self.value_after(equals.span, "the column's default after `=`")?;
+            end = value.span;
+            match value.kind {
+                ExprKind::Call(function, args) if matches!(&function.kind, ExprKind::Name(name) if name == "field") => {
+                    for arg in args {
+                        match &arg.name {
+                            Some(name) if name.text == "default" => default = Some(arg.value),
+                            _ => field.push(arg),
+                        }
+                    }
+                }
+                _ => default = Some(value),
+            }
+        }
+        Ok(ColumnDef {
+            span: name.span.to(end),
+            name,
+            ty,
+            nullable,
+            default,
+            field,
+        })
+    }
+
+    fn create_index(&mut self, keyword: Token, unique: bool) -> Parse<Statement> {
+        let name = if self.at_word("on") {
+            None
+        } else {
+            Some(self.name("the index's name, or `on` and its table")?)
+        };
+        if !self.at_word("on") {
+            return Err(self.expected("`on` and the table, as in `create index on cases(-risk)`"));
+        }
+        self.bump();
+        let table = self.path("the table after `on`")?;
+        let open = self.expect(T::LParen, "`(` and the columns of the index")?;
+        let (keys, close) = self.inside(|p| {
+            let mut keys = Vec::new();
+            loop {
+                if p.at(T::RParen) {
+                    break;
+                }
+                let value = p.expr()?;
+                let span = value.span;
+                keys.push(match value.kind {
+                    ExprKind::Unary(UnaryOp::Neg, inner) => SortKey {
+                        value: *inner,
+                        descending: true,
+                        span,
+                    },
+                    kind => SortKey {
+                        value: Expr { kind, span },
+                        descending: false,
+                        span,
+                    },
+                });
+                if p.eat(T::Comma).is_none() {
+                    break;
+                }
+            }
+            let close = p.close(open, T::RParen, "`,` or `)`")?;
+            Ok((keys, close))
+        })?;
+        if keys.is_empty() {
+            return Err(self.report(
+                Diagnostic::error(open.span.to(close.span), "an index needs a column")
+                    .with_help("for example: `create index on cases(-risk, raised)`"),
+            ));
+        }
+        let options = self.options()?;
+        let end = options
+            .last()
+            .map_or(close.span, |option| option.value.span);
+        let span = keyword.span.to(end);
+        Ok(Statement {
+            span,
+            kind: StatementKind::CreateIndex(CreateIndex {
+                unique,
+                name,
+                table,
+                keys,
+                options,
+                span,
+            }),
+        })
+    }
+
+    fn alter_table(&mut self) -> Parse<Statement> {
+        let keyword = self.bump();
+        self.bump();
+        let table = self.path("the table's name after `alter table`")?;
+        let Some(colon) = self.eat(T::Colon) else {
+            return Err(self.expected("`:`, and the changes on the lines after it"));
+        };
+        let changes = self.block(
+            colon,
+            "the changes to the table",
+            "notes: str | None",
+            |p| p.change(),
+        )?;
+        let end = changes.last().map_or(colon.span, |(_, span)| *span);
+        let span = keyword.span.to(end);
+        Ok(Statement {
+            span,
+            kind: StatementKind::AlterTable(AlterTable {
+                table,
+                changes: changes.into_iter().map(|(change, _)| change).collect(),
+                span,
+            }),
+        })
+    }
+
+    /// A line of `alter table`: a column to add, `del name`, or `rename old to new`.
+    fn change(&mut self) -> Parse<(Change, Span)> {
+        let token = self.tok();
+        if token.kind == T::Del {
+            self.bump();
+            let name = self.name("the column to drop after `del`")?;
+            let span = token.span.to(name.span);
+            return Ok((Change::Drop(name), span));
+        }
+        if token.kind == T::Name && self.text(token) == "rename" && self.nth(1).kind != T::Colon {
+            self.bump();
+            let from = self.name("the column to rename")?;
+            if !self.at_word("to") {
+                return Err(
+                    self.expected("`to` and the column's new name, as in `rename risk to score`")
+                );
+            }
+            self.bump();
+            let to = self.name("the column's new name")?;
+            let span = token.span.to(to.span);
+            return Ok((Change::Rename { from, to }, span));
+        }
+        let column = self.column_def()?;
+        let span = column.span;
+        Ok((Change::Add(column), span))
+    }
+
+    fn drop_statement(&mut self) -> Parse<Statement> {
+        let keyword = self.bump();
+        let kind = self.bump();
+        let index = self.text(kind) == "index";
+        let name = self.path(if index {
+            "the index's name after `drop index`"
+        } else {
+            "the table's name after `drop table`"
+        })?;
+        let options = self.options()?;
+        let end = options.last().map_or(name.span, |option| option.value.span);
+        let span = keyword.span.to(end);
+        Ok(Statement {
+            span,
+            kind: StatementKind::Drop(Drop {
+                index,
+                name,
+                options,
+                span,
+            }),
+        })
+    }
+
+    /// `grant read, write on cases, accounts to analyst`, or `revoke write on cases from analyst`.
+    fn grant(&mut self) -> Parse<Statement> {
+        let keyword = self.bump();
+        let revoke = self.text(keyword) == "revoke";
+        let mut privileges = Vec::new();
+        loop {
+            privileges.push(self.name(
+                "what may be done: `read`, `write`, `insert`, `update`, `delete` or `all`",
+            )?);
+            if self.eat(T::Comma).is_none() {
+                break;
+            }
+        }
+        if !self.at_word("on") {
+            return Err(self.expected("`on` and the tables"));
+        }
+        self.bump();
+        let mut tables = Vec::new();
+        loop {
+            tables.push(self.path("a table")?);
+            if self.eat(T::Comma).is_none() {
+                break;
+            }
+        }
+        let to = if revoke { "from" } else { "to" };
+        if !(self.at_word(to) || (revoke && self.at(T::From))) {
+            return Err(self.expected(&format!("`{to}` and the users or roles")));
+        }
+        self.bump();
+        let mut roles = Vec::new();
+        loop {
+            roles.push(self.name("a user or a role")?);
+            if self.eat(T::Comma).is_none() {
+                break;
+            }
+        }
+        let span = keyword.span.to(roles[roles.len() - 1].span);
+        Ok(Statement {
+            span,
+            kind: StatementKind::Grant(Grant {
+                revoke,
+                privileges,
+                tables,
+                roles,
+                span,
+            }),
+        })
+    }
+
+    /// `with transaction:` and the statements on the lines after it, which run together, all or none.
+    fn transaction(&mut self, items: &mut Vec<Item>, in_transaction: bool) -> Parse<Statement> {
+        let keyword = self.bump();
+        self.bump();
+        let Some(colon) = self.eat(T::Colon) else {
+            return Err(self.expected("`:`, and the statements on the lines after it"));
+        };
+        if in_transaction {
+            self.note(
+                Diagnostic::error(keyword.span, "a transaction can't hold another")
+                    .with_help("the statements of one `with transaction:` already run together"),
+            );
+        }
+        let first = self.tok();
+        if first.kind == T::Eof
+            || !first.line_start
+            || first.col.compare(self.block) != Some(Ordering::Greater)
+        {
+            return Err(self.missing_block(
+                colon,
+                "the statements that run together",
+                "from accounts; where id == \"A1\"; update balance -= 100",
+            ));
+        }
+        let outer = self.block;
+        self.block = first.col;
+        let body = self.statements(End::Block, items, true);
+        self.block = outer;
+        let end = body.last().map_or(colon.span, |statement| statement.span);
+        Ok(Statement {
+            span: keyword.span.to(end),
+            kind: StatementKind::Transaction(body),
+        })
+    }
+
+    /// What is given after a comma, as Python's keyword arguments: `, exist_ok=True`.
+    fn options(&mut self) -> Parse<Vec<Arg>> {
+        let mut options = Vec::new();
+        while self.at(T::Comma)
+            && matches!(self.peek_nth(1), T::Name)
+            && self.peek_nth(2) == T::Assign
+        {
+            self.bump();
+            let name = self.name("an option's name")?;
+            let equals = self.bump();
+            let value = self.value_after(equals.span, "a value after `=`")?;
+            options.push(Arg {
+                name: Some(name),
+                value,
+            });
+        }
+        Ok(options)
+    }
+
+    /// The lines of a block after a `:`, indented, each read by `line`.
+    fn block<X>(
+        &mut self,
+        colon: Token,
+        what: &str,
+        example: &str,
+        mut line: impl FnMut(&mut Self) -> Parse<X>,
+    ) -> Parse<Vec<X>> {
+        let first = self.tok();
+        if first.kind == T::Eof
+            || !first.line_start
+            || first.col.compare(self.block) != Some(Ordering::Greater)
+        {
+            return Err(self.missing_block(colon, what, example));
+        }
+        let outer = self.block;
+        self.block = first.col;
+        let mut lines = Vec::new();
+        loop {
+            let token = self.tok();
+            if token.kind == T::Eof {
+                break;
+            }
+            if token.kind == T::Semicolon {
+                self.bump();
+                continue;
+            }
+            if token.line_start && !self.line_belongs(token, End::Block) {
+                break;
+            }
+            let start = self.pos;
+            self.line_head = start;
+            match line(self) {
+                Ok(read) => {
+                    lines.push(read);
+                    self.end_of_step();
+                }
+                Err(Fail) => self.recover(start),
+            }
+        }
+        self.block = outer;
+        Ok(lines)
     }
 
     /// The string alone on the first line of a file or a `def`, if there is one.
@@ -569,7 +1318,7 @@ impl<'a> Parser<'a> {
     // ---- Definitions
 
     /// `def name(parameters):` and its body.
-    fn def(&mut self) -> Parse<Def> {
+    fn def(&mut self, decorators: Vec<Name>) -> Parse<Def> {
         let keyword = self.bump();
         let name = self.name("a name after `def`")?;
         let open = self.expect(T::LParen, "`(` and the parameters")?;
@@ -591,6 +1340,7 @@ impl<'a> Parser<'a> {
             name,
             params,
             returns,
+            decorators,
             docstring,
             body,
             span: keyword.span.to(end),
@@ -831,6 +1581,10 @@ impl<'a> Parser<'a> {
                 "distinct" => self.distinct_step(),
                 "group" => self.group_step(),
                 "summarize" => self.summarize_step(),
+                "update" => self.update_step(),
+                "delete" => self.delete_step(),
+                "insert" => self.insert_step(),
+                "pivot" => self.pivot_step(),
                 "join" => self.join_step(None),
                 "left" if next.kind == T::Name && self.text(next) == "join" && !next.line_start => {
                     let left = self.bump();
@@ -935,6 +1689,7 @@ impl<'a> Parser<'a> {
         let value = match self.peek() {
             T::LParen if self.nth(1).kind == T::From => self.bracketed_query()?,
             T::Name | T::QuotedName => self.primary()?,
+            T::LBracket => self.list()?,
             T::Str | T::FString => {
                 let token = self.tok();
                 return Err(self.report(
@@ -1006,31 +1761,250 @@ impl<'a> Parser<'a> {
             operator.span,
             &format!("a value after `{}`", self.text(operator)),
         )?;
-        let value = if operator.kind == T::AugAssign {
-            let op = match self.text(operator).trim_end_matches('=') {
-                "+" => BinaryOp::Add,
-                "-" => BinaryOp::Sub,
-                "*" => BinaryOp::Mul,
-                "/" => BinaryOp::Div,
-                "//" => BinaryOp::FloorDiv,
-                "%" => BinaryOp::Mod,
-                _ => BinaryOp::Pow,
-            };
-            let column = Expr {
-                kind: ExprKind::Name(name.text.clone()),
-                span: name.span,
-            };
-            Expr {
-                span: name.span.to(value.span),
-                kind: ExprKind::Binary(op, Box::new(column), Box::new(value)),
-            }
-        } else {
-            value
-        };
+        let value = self.assigned(&name, operator, value);
         Ok(Step {
             span: name.span.to(value.span),
             kind: StepKind::Column { name, value },
         })
+    }
+
+    /// The value a column is given: `risk += 1` is `risk = risk + 1`, as in Python.
+    fn assigned(&self, name: &Name, operator: Token, value: Expr) -> Expr {
+        if operator.kind != T::AugAssign {
+            return value;
+        }
+        let op = match self.text(operator).trim_end_matches('=') {
+            "+" => BinaryOp::Add,
+            "-" => BinaryOp::Sub,
+            "*" => BinaryOp::Mul,
+            "/" => BinaryOp::Div,
+            "//" => BinaryOp::FloorDiv,
+            "%" => BinaryOp::Mod,
+            _ => BinaryOp::Pow,
+        };
+        let column = Expr {
+            kind: ExprKind::Name(name.text.clone()),
+            span: name.span,
+        };
+        Expr {
+            span: name.span.to(value.span),
+            kind: ExprKind::Binary(op, Box::new(column), Box::new(value)),
+        }
+    }
+
+    /// `update status = "closed", risk += 1`.
+    fn update_step(&mut self) -> Parse<Step> {
+        let keyword = self.bump();
+        let mut fields = Vec::new();
+        loop {
+            if self.at_end() {
+                return Err(
+                    self.expected("a column and its new value, as in `update status = \"closed\"`")
+                );
+            }
+            let name = self.name("a column to change")?;
+            let operator = match self.peek() {
+                T::Assign | T::AugAssign => self.bump(),
+                T::EqEq => {
+                    let token = self.tok();
+                    return Err(self.report(
+                        Diagnostic::error(token.span, "use `=` to give the column its new value")
+                            .with_label("`==` compares; `=` gives a value"),
+                    ));
+                }
+                _ => return Err(self.expected("`=` and the column's new value")),
+            };
+            let value = self.value_after(operator.span, "the column's new value")?;
+            let value = self.assigned(&name, operator, value);
+            fields.push(Field {
+                span: name.span.to(value.span),
+                name: Some(name),
+                value,
+            });
+            if self.eat(T::Comma).is_none() {
+                break;
+            }
+        }
+        let end = fields.last().map_or(keyword.span, |field| field.span);
+        Ok(Step {
+            span: keyword.span.to(end),
+            kind: StepKind::Update(fields),
+        })
+    }
+
+    fn delete_step(&mut self) -> Parse<Step> {
+        let keyword = self.bump();
+        if !self.at_end() {
+            let token = self.tok();
+            return Err(self.report(
+                Diagnostic::error(token.span, "`delete` takes nothing after it")
+                    .with_label("the steps before it choose the rows")
+                    .with_help("for example:\n\n    from cases\n    where key.startswith(\"TEST-\")\n    delete"),
+            ));
+        }
+        Ok(Step {
+            span: keyword.span,
+            kind: StepKind::Delete,
+        })
+    }
+
+    fn insert_step(&mut self) -> Parse<Step> {
+        let keyword = self.bump();
+        if !self.at_word("into") {
+            let (span, found) = self.found();
+            return Err(self.report(
+                Diagnostic::error(
+                    span,
+                    format!("expected `into` after `insert`, found {found}"),
+                )
+                .with_help("for example: `insert into archive`"),
+            ));
+        }
+        self.bump();
+        let table = self.path("the table to insert into")?;
+        Ok(Step {
+            span: keyword.span.to(table.span),
+            kind: StepKind::Insert(table),
+        })
+    }
+
+    /// `pivot band in ["critical", "high"] by operator:` and its block of totals.
+    fn pivot_step(&mut self) -> Parse<Step> {
+        let keyword = self.bump();
+        let test = self.value_after(
+            keyword.span,
+            "a column and its values, as in `pivot band in [\"critical\", \"high\"]`",
+        )?;
+        let (column, values) = match test.kind {
+            ExprKind::Compare(column, mut rest)
+                if rest.len() == 1
+                    && rest[0].0 == CompareOp::In
+                    && matches!(rest[0].1.kind, ExprKind::List(_) | ExprKind::Tuple(_)) =>
+            {
+                let (_, list) = rest.remove(0);
+                let values = match list.kind {
+                    ExprKind::List(values) | ExprKind::Tuple(values) => values,
+                    _ => Vec::new(),
+                };
+                (*column, values)
+            }
+            _ => {
+                return Err(self.report(
+                    Diagnostic::error(
+                        test.span,
+                        "`pivot` takes a column and the list of its values that become columns",
+                    )
+                    .with_help("for example: `pivot band in [\"critical\", \"high\", \"low\"] by operator:`"),
+                ));
+            }
+        };
+        let mut by = Vec::new();
+        if self.at_word("by") {
+            self.bump();
+            by = self.fields("a column to group by")?.0;
+        }
+        let Some(colon) = self.eat(T::Colon) else {
+            let (span, found) = self.found();
+            return Err(self.report(
+                Diagnostic::error(span, format!("expected `:` and the totals, found {found}"))
+                    .with_help("the totals go on the lines after it, indented:\n\n    pivot band in [\"high\", \"low\"] by operator:\n        n = count()"),
+            ));
+        };
+        let totals = self.block_of_totals(colon)?;
+        let end = totals.last().map_or(colon.span, |total| total.span);
+        let expanded = self.pivoted(&column, &values, &totals)?;
+        Ok(Step {
+            span: keyword.span.to(end),
+            kind: StepKind::Pivot {
+                column,
+                values,
+                by,
+                totals,
+                expanded,
+            },
+        })
+    }
+
+    /// A pivot's totals for each value: `n = count()` for `band in ["high", "low"]` is `high = count(where=band ==
+    /// "high")` and `low = count(where=band == "low")`.
+    fn pivoted(&mut self, column: &Expr, values: &[Expr], totals: &[Field]) -> Parse<Vec<Field>> {
+        if values.is_empty() {
+            return Err(self.report(
+                Diagnostic::error(
+                    column.span,
+                    "a pivot needs the values that become its columns",
+                )
+                .with_help("for example: `pivot band in [\"critical\", \"high\"] by operator:`"),
+            ));
+        }
+        let mut expanded = Vec::new();
+        for value in values {
+            let label = match &value.kind {
+                ExprKind::Str(text) => text.clone(),
+                ExprKind::Number(number) => number.text.clone(),
+                ExprKind::Bool(true) => "True".to_string(),
+                ExprKind::Bool(false) => "False".to_string(),
+                ExprKind::None => "None".to_string(),
+                _ => {
+                    return Err(self.report(
+                        Diagnostic::error(value.span, "a pivot's values are written in the query")
+                            .with_label("each value names a column, so it is a string or a number")
+                            .with_help("for example: `pivot band in [\"critical\", \"high\"]`"),
+                    ));
+                }
+            };
+            for total in totals {
+                let Some(name) = &total.name else {
+                    continue;
+                };
+                let ExprKind::Call(function, args) = &total.value.kind else {
+                    return Err(self.report(
+                        Diagnostic::error(total.value.span, "each total of a pivot is a call")
+                            .with_help("for example: `n = count()` or `money = sum(amount)`"),
+                    ));
+                };
+                let condition = Expr {
+                    span: value.span,
+                    kind: ExprKind::Compare(
+                        Box::new(column.clone()),
+                        vec![(CompareOp::Eq, value.clone())],
+                    ),
+                };
+                let mut args = args.clone();
+                match args
+                    .iter_mut()
+                    .find(|arg| arg.name.as_ref().is_some_and(|name| name.text == "where"))
+                {
+                    Some(given) => {
+                        given.value = binary(BinaryOp::And, given.value.clone(), condition);
+                    }
+                    None => args.push(Arg {
+                        name: Some(Name {
+                            text: "where".to_string(),
+                            span: value.span,
+                        }),
+                        value: condition,
+                    }),
+                }
+                let text = if totals.len() == 1 {
+                    label.clone()
+                } else {
+                    format!("{label}_{}", name.text)
+                };
+                expanded.push(Field {
+                    name: Some(Name {
+                        text,
+                        span: name.span,
+                    }),
+                    value: Expr {
+                        kind: ExprKind::Call(function.clone(), args),
+                        span: total.value.span,
+                    },
+                    span: total.span,
+                });
+            }
+        }
+        Ok(expanded)
     }
 
     fn select_step(&mut self) -> Parse<Step> {
@@ -1556,6 +2530,13 @@ impl<'a> Parser<'a> {
                 if !(self.at_other("|") || self.at_other("||")) {
                     return Ok(left);
                 }
+                // Between queries, `|` is the rows of both with repeats dropped, as for Python's sets.
+                if self.at_other("|") && is_query_value(&left) {
+                    self.bump();
+                    let right = self.conjunction()?;
+                    left = binary(BinaryOp::BitOr, left, right);
+                    continue;
+                }
                 let token = self.bump();
                 let mut problem = Diagnostic::error(token.span, "use `or`").with_label(format!(
                     "`{}` is not how ButtercupQL writes “or”",
@@ -1578,6 +2559,13 @@ impl<'a> Parser<'a> {
             if self.eat(T::And).is_none() {
                 if !(self.at_other("&") || self.at_other("&&")) {
                     return Ok(left);
+                }
+                // Between queries, `&` is the rows in both.
+                if self.at_other("&") && is_query_value(&left) {
+                    self.bump();
+                    let right = self.inversion()?;
+                    left = binary(BinaryOp::BitAnd, left, right);
+                    continue;
                 }
                 let token = self.bump();
                 self.note(
@@ -1947,17 +2935,46 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// `{a, b}`.
+    /// `{a, b}`, or a dictionary: `{"id": "A1", "operator": "Acme"}`, a row for `from [...]`.
     fn set(&mut self) -> Parse<Expr> {
         let open = self.bump();
         self.inside(|p| {
             if let Some(close) = p.eat(T::RBrace) {
-                return Err(p.report(Diagnostic::error(
-                    open.span.to(close.span),
-                    "`{}` is an empty dictionary in Python, and dictionaries are not supported",
-                )));
+                return Err(p.report(
+                    Diagnostic::error(open.span.to(close.span), "`{}` is an empty dictionary")
+                        .with_help(
+                            "a row written as a dictionary names its columns: `{\"id\": \"A1\"}`",
+                        ),
+                ));
             }
-            let (items, close) = p.items(open, T::RBrace)?;
+            let first = p.expr()?;
+            if p.eat(T::Colon).is_some() {
+                let value = p.expr()?;
+                let mut pairs = vec![(first, value)];
+                while p.eat(T::Comma).is_some() {
+                    if p.at(T::RBrace) {
+                        break;
+                    }
+                    let key = p.expr()?;
+                    p.expect(T::Colon, "`:` and the column's value")?;
+                    let value = p.expr()?;
+                    pairs.push((key, value));
+                }
+                let close = p.close(open, T::RBrace, "`,` or `}`")?;
+                return Ok(Expr {
+                    kind: ExprKind::Dict(pairs),
+                    span: open.span.to(close.span),
+                });
+            }
+            p.no_comprehension(open)?;
+            let mut items = vec![first];
+            while p.eat(T::Comma).is_some() {
+                if p.at(T::RBrace) {
+                    break;
+                }
+                items.push(p.expr()?);
+            }
+            let close = p.close(open, T::RBrace, "`,` or `}`")?;
             Ok(Expr {
                 kind: ExprKind::Set(items),
                 span: open.span.to(close.span),
@@ -2208,7 +3225,24 @@ fn is_source(expr: &Expr) -> bool {
     match &expr.kind {
         ExprKind::Call(function, _) => is_path(function),
         ExprKind::Query(_) => true,
+        // Rows written in the query: `from [{"id": "A1"}, {"id": "A2"}]`.
+        ExprKind::List(rows) => {
+            !rows.is_empty() && rows.iter().all(|row| matches!(row.kind, ExprKind::Dict(_)))
+        }
         _ => is_path(expr),
+    }
+}
+
+/// Whether a value is a query, or queries joined by `+`, `-`, `|` or `&`.
+fn is_query_value(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Query(_) => true,
+        ExprKind::Binary(
+            BinaryOp::Add | BinaryOp::Sub | BinaryOp::BitOr | BinaryOp::BitAnd,
+            left,
+            _,
+        ) => is_query_value(left),
+        _ => false,
     }
 }
 

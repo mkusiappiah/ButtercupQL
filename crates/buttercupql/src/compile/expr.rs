@@ -372,6 +372,13 @@ impl<'a> Compiler<'a> {
                 );
                 Some(Typed::from(sql, ty, &[&test, &then, &otherwise]))
             }
+            ExprKind::Dict(_) => {
+                let problem = self
+                    .error(expr.span, "a dictionary is a row, written in `from [...]`")
+                    .with_help("for example: `from [{\"id\": \"A1\", \"operator\": \"Acme\"}]`, then `insert into accounts`");
+                self.report(problem);
+                None
+            }
             ExprKind::List(_) | ExprKind::Tuple(_) | ExprKind::Set(_) => {
                 let problem = self
                     .error(expr.span, "a list can only be used after `in`")
@@ -491,10 +498,21 @@ impl<'a> Compiler<'a> {
         span: Span,
         cx: Cx<'_>,
     ) -> Option<Typed> {
+        if matches!(op, BinaryOp::BitOr | BinaryOp::BitAnd) {
+            let problem = self
+                .error(
+                    span,
+                    format!("`{}` combines the rows of two queries", op.symbol()),
+                )
+                .with_help("between values, Python writes `or` and `and`");
+            self.report(problem);
+            return None;
+        }
         let a = self.expr(left, cx);
         let b = self.expr(right, cx);
         let (a, b) = (a?, b?);
         match op {
+            BinaryOp::BitOr | BinaryOp::BitAnd => None,
             BinaryOp::And | BinaryOp::Or => {
                 let sql_op = if op == BinaryOp::And {
                     Binary::And

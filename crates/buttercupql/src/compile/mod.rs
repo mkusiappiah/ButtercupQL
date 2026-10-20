@@ -7,6 +7,8 @@
 //! The expressions are compiled in [`expr`], and functions, totals and window functions in [`call`].
 
 mod call;
+mod change;
+mod ddl;
 mod expr;
 #[cfg(test)]
 mod tests;
@@ -205,6 +207,9 @@ impl Rel {
 /// The names a `def`'s body can use: its parameters.
 type Bindings = HashMap<String, Typed>;
 
+/// The columns a query gives: their names, types, and whether each can be missing.
+type Columns = Vec<(String, Type, bool)>;
+
 /// Where an expression is compiled.
 #[derive(Clone, Copy)]
 struct Cx<'f> {
@@ -273,6 +278,13 @@ pub(crate) struct Compiler<'a> {
     pub(crate) diagnostics: Vec<Diagnostic>,
     /// A step has failed, so a name it should have made is not reported as missing.
     poisoned: bool,
+    /// The recursive queries being compiled, by name, with their columns: in its second part, a recursive query
+    /// reads its own rows as a table.
+    ctes: Vec<(String, Columns)>,
+    /// Whether the schema knows every table, as one given does, rather than only the tables the file creates.
+    complete: bool,
+    /// The tables the file has dropped before the statement being compiled.
+    gone: Vec<String>,
 }
 
 impl<'a> Compiler<'a> {
@@ -355,12 +367,27 @@ impl<'a> Compiler<'a> {
             aliases: 0,
             diagnostics: Vec::new(),
             poisoned: false,
+            ctes: Vec::new(),
+            complete: true,
+            gone: Vec::new(),
         };
         compiler.check_imports();
         compiler
     }
 
     /// Reports each name imported from a module that does not define it.
+    /// Knows that the schema holds only the tables the file creates, so a table it does not hold may still be.
+    pub(crate) fn partial(mut self) -> Self {
+        self.complete = false;
+        self
+    }
+
+    /// Knows the tables the file has dropped, which statements after it can't read.
+    pub(crate) fn without(mut self, gone: &[String]) -> Self {
+        self.gone = gone.to_vec();
+        self
+    }
+
     fn check_imports(&mut self) {
         for module in 0..self.spaces.len() {
             let mut items: Vec<(usize, String, Span)> =
@@ -460,6 +487,14 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    /// The named queries combined that a source names: `reached = (from ...) | (from ...)`.
+    fn named_compound(&self, expr: &ast::Expr) -> Option<(usize, &'a ast::Let)> {
+        match self.find_path(expr)? {
+            Found::Let(module, value) if change::is_compound(&value.value) => Some((module, value)),
+            _ => None,
+        }
+    }
+
     /// The `def` a call names: `recent`, or `shared.recent`.
     fn def(&self, expr: &ast::Expr) -> Option<(usize, &'a ast::Def)> {
         match self.find_path(expr)? {
@@ -484,29 +519,24 @@ impl<'a> Compiler<'a> {
 
     // ---- What is compiled
 
-    /// The file's query, compiled.
-    pub(crate) fn main(&mut self) -> Option<Select> {
-        let Some(query) = &self.modules[0].file.query else {
-            let problem = Diagnostic::error(Span::default(), "this file has no query to compile")
-                .with_help("a query starts with `from` and a table, after the file's definitions");
-            self.report(problem);
-            return None;
-        };
-        let rel = self.query(&query.steps, &Bindings::new())?;
-        Some(self.finish(rel))
-    }
-
     /// A named query or a query `def` of the file, compiled. A `def`'s parameters become placeholders, filled when
     /// the query runs.
-    pub(crate) fn named(&mut self, name: &str) -> Option<(Select, Vec<Arg>)> {
+    pub(crate) fn named(&mut self, name: &str) -> Option<(crate::sql::Statement, Vec<Arg>)> {
         let found = self.find(0, name);
         let problem = match found {
             Some(Found::Let(module, value)) => match &value.value.kind {
                 ExprKind::Query(query) => {
-                    let rel = self.within(module, |compiler| {
-                        compiler.query(&query.steps, &Bindings::new())
+                    let statement = self.within(module, |compiler| {
+                        compiler.statement(&query.steps, &Bindings::new())
                     })?;
-                    return Some((self.finish(rel), Vec::new()));
+                    return Some((statement, Vec::new()));
+                }
+                _ if change::is_compound(&value.value) => {
+                    let own = value.name.text.as_str();
+                    let rel = self.within(module, |compiler| {
+                        compiler.compound(&value.value, Some(own), &Bindings::new())
+                    })?;
+                    return Some((crate::sql::Statement::Select(self.finish(rel)), Vec::new()));
                 }
                 _ => {
                     Diagnostic::error(value.name.span, format!("`{name}` is a value, not a query"))
@@ -514,8 +544,9 @@ impl<'a> Compiler<'a> {
             },
             Some(Found::Def(module, def)) if def.is_query() => {
                 let (bindings, args) = self.within(module, |compiler| compiler.open_args(def))?;
-                let rel = self.within(module, |compiler| compiler.query(&def.body, &bindings))?;
-                return Some((self.finish(rel), args));
+                let statement =
+                    self.within(module, |compiler| compiler.statement(&def.body, &bindings))?;
+                return Some((statement, args));
             }
             Some(Found::Def(_, def)) => {
                 Diagnostic::error(def.name.span, format!("`{name}` holds steps, not a query"))
@@ -633,6 +664,18 @@ impl<'a> Compiler<'a> {
             StepKind::Summarize(totals) => self.group(rel, None, totals, bindings),
             StepKind::Join { left, source, on } => self.join(rel, *left, source, on, bindings),
             StepKind::Call(call) => self.call_steps(rel, call, bindings),
+            StepKind::Pivot { by, expanded, .. } => {
+                let by = (!by.is_empty()).then_some(by.as_slice());
+                self.group(rel, by, expanded, bindings)
+            }
+            StepKind::Update(_) | StepKind::Delete | StepKind::Insert(_) => {
+                let problem = self
+                    .error(step.span, "a query that changes rows can't be read as rows")
+                    .with_help("a `def` that changes rows is called on a line of its own: `close_stale(90)`");
+                self.report(problem);
+                self.poisoned = true;
+                rel
+            }
         }
     }
 
@@ -789,10 +832,13 @@ impl<'a> Compiler<'a> {
     /// Whether a source is a query rather than a table: a named query, a query `def`, or a query in brackets.
     fn is_query(&self, value: &ast::Expr, bindings: &Bindings) -> bool {
         match &value.kind {
-            ExprKind::Query(_) | ExprKind::Call(..) => true,
+            ExprKind::Query(_) | ExprKind::Call(..) | ExprKind::List(_) => true,
             ExprKind::Name(name) if bindings.contains_key(name) => false,
+            ExprKind::Name(name) if self.ctes.iter().any(|(cte, _)| cte == name) => false,
             ExprKind::Name(_) | ExprKind::Attribute(..) => {
-                self.named_query(value).is_some() || self.def(value).is_some()
+                self.named_query(value).is_some()
+                    || self.named_compound(value).is_some()
+                    || self.def(value).is_some()
             }
             _ => false,
         }
@@ -802,6 +848,19 @@ impl<'a> Compiler<'a> {
     fn relation(&mut self, value: &'a ast::Expr, bindings: &Bindings) -> Option<Rel> {
         if let ExprKind::Query(query) = &value.kind {
             return self.query(&query.steps, bindings);
+        }
+        if let ExprKind::List(rows) = &value.kind {
+            return self.rows(rows, value.span);
+        }
+        if let Some((module, named)) = self.named_compound(value) {
+            let name = path_of(value).join(".");
+            self.enter(module, &name, value.span)?;
+            let own = named.name.text.as_str();
+            let rel = self.within(module, |compiler| {
+                compiler.compound(&named.value, Some(own), &Bindings::new())
+            });
+            self.stack.pop();
+            return rel;
         }
         if let Some((module, query)) = self.named_query(value) {
             let name = path_of(value).join(".");
@@ -873,6 +932,11 @@ impl<'a> Compiler<'a> {
 
     /// A table: what the schema knows of it, or nothing.
     fn table(&mut self, source: &ast::Source) -> Rel {
+        if let ExprKind::Name(name) = &source.value.kind {
+            if let Some(rel) = self.cte_table(name, source) {
+                return rel;
+            }
+        }
         let path = path_of(&source.value);
         let written = path.join(".");
         let (path, table) = match self.schema {
@@ -881,6 +945,14 @@ impl<'a> Compiler<'a> {
                     table.name.split('.').map(str::to_string).collect(),
                     Some(table),
                 ),
+                None if !self.complete
+                    && !self
+                        .gone
+                        .iter()
+                        .any(|gone| gone.eq_ignore_ascii_case(&written)) =>
+                {
+                    (path, None)
+                }
                 None => {
                     let names: Vec<String> = schema
                         .tables()
@@ -2039,9 +2111,21 @@ fn step_exprs(step: &ast::Step) -> Vec<&ast::Expr> {
         }
         StepKind::Del(columns) => columns.iter().collect(),
         StepKind::Sort { keys, .. } => keys.iter().map(|key| &key.value).collect(),
-        StepKind::From(_) | StepKind::Join { .. } | StepKind::Distinct | StepKind::Pass => {
-            Vec::new()
-        }
+        StepKind::Update(fields) => fields.iter().map(|field| &field.value).collect(),
+        StepKind::Pivot {
+            column,
+            by,
+            expanded,
+            ..
+        } => std::iter::once(column)
+            .chain(by.iter().chain(expanded).map(|field| &field.value))
+            .collect(),
+        StepKind::From(_)
+        | StepKind::Join { .. }
+        | StepKind::Distinct
+        | StepKind::Pass
+        | StepKind::Delete
+        | StepKind::Insert(_) => Vec::new(),
     }
 }
 

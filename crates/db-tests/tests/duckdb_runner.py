@@ -39,4 +39,5 @@ def main():
     json.dump(results, sys.stdout)
 
 
-main()
+if __name__ == "__main__":
+    main()

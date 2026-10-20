@@ -67,9 +67,63 @@ pub const STEPS: &[Builtin] = &[
         "Add another table's columns, keeping the rows that have no match.",
     ),
     builtin(
+        "update",
+        "update status = \"closed\", risk += 1",
+        "Change the rows the steps before chose: give columns new values. A `select` after it gives the rows changed.",
+    ),
+    builtin(
+        "delete",
+        "delete",
+        "Delete the rows the steps before chose.",
+    ),
+    builtin(
+        "insert",
+        "insert into archive",
+        "Add the rows of the steps before to a table, its columns matched by name.",
+    ),
+    builtin(
+        "pivot",
+        "pivot band in [\"critical\", \"high\"] by operator:",
+        "One row for each group, with a column of each total of the block below for each value.",
+    ),
+    builtin(
         "pass",
         "pass",
         "Do nothing, as in Python: a block with no steps yet.",
+    ),
+];
+
+/// The statements that change the database itself, each on a line of its own.
+pub const STATEMENTS: &[Builtin] = &[
+    builtin(
+        "create",
+        "create table cases:",
+        "Create a table, its columns written as Python annotations below: `risk: int | None`. `create index on cases(-risk)` creates an index.",
+    ),
+    builtin(
+        "alter",
+        "alter table cases:",
+        "Change a table: add a column written as in `create table`, `del` one, or `rename old to new`.",
+    ),
+    builtin(
+        "drop",
+        "drop table archive",
+        "Drop a table, or with `drop index`, an index.",
+    ),
+    builtin(
+        "grant",
+        "grant read on cases to analyst",
+        "Let users or roles read or write tables: `read`, `write`, `insert`, `update`, `delete` or `all`.",
+    ),
+    builtin(
+        "revoke",
+        "revoke write on cases from analyst",
+        "Take permissions away again.",
+    ),
+    builtin(
+        "with",
+        "with transaction:",
+        "Run the statements below together: all of them, or none if one fails.",
     ),
 ];
 
@@ -275,12 +329,15 @@ mod tests {
         let mut words: Vec<&str> = crate::parser::STEP_WORDS.to_vec();
         words.push("pass");
         assert_eq!(described, words);
+        let statements: Vec<&str> = STATEMENTS.iter().map(|statement| statement.name).collect();
+        assert_eq!(statements, crate::parser::STATEMENT_WORDS);
     }
 
     #[test]
     fn every_description_is_a_sentence() {
         for builtin in STEPS
             .iter()
+            .chain(STATEMENTS)
             .chain(FUNCTIONS)
             .chain(METHODS)
             .chain(DATE_PARTS)

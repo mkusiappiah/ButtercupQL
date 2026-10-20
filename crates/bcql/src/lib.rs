@@ -11,7 +11,7 @@ use std::path::Path;
 use buttercupql::ast::{ExprKind, Item, StepKind};
 use buttercupql::{
     Diagnostic, Dialect, FileLoader, Options, Param, ParamStyle, Schema, Severity, SourceFile,
-    Value,
+    StatementKind, Value,
 };
 
 const HELP: &str = "\
@@ -272,15 +272,29 @@ fn compile(args: &[String]) -> Result<u8, String> {
                         )
                     })
                     .collect();
+                let statements: Vec<String> = compiled
+                    .statements
+                    .iter()
+                    .map(|statement| {
+                        let params: Vec<String> = statement.params.iter().map(json_param).collect();
+                        format!(
+                            "{{\"sql\": {}, \"params\": [{}], \"kind\": {}}}",
+                            json_string(&statement.sql),
+                            params.join(", "),
+                            json_string(kind_name(statement.kind))
+                        )
+                    })
+                    .collect();
                 println!(
-                    "{{\"sql\": {}, \"params\": [{}], \"args\": [{}]}}",
+                    "{{\"sql\": {}, \"params\": [{}], \"args\": [{}], \"statements\": [{}]}}",
                     json_string(&compiled.sql),
                     params.join(", "),
-                    arguments.join(", ")
+                    arguments.join(", "),
+                    statements.join(", ")
                 );
-            } else {
-                println!("{}", compiled.sql);
-                if !compiled.params.is_empty() {
+            } else if let [statement] = compiled.statements.as_slice() {
+                println!("{}", statement.sql);
+                if !statement.params.is_empty() {
                     println!("-- parameters: [{}]", params.join(", "));
                 }
                 if !compiled.args.is_empty() {
@@ -293,6 +307,18 @@ fn compile(args: &[String]) -> Result<u8, String> {
                         })
                         .collect();
                     println!("-- arguments: {}", arguments.join(", "));
+                }
+            } else {
+                // Several statements, each ended with `;`, and with its own parameters: they run one by one.
+                for (n, statement) in compiled.statements.iter().enumerate() {
+                    if n > 0 {
+                        println!();
+                    }
+                    println!("{};", statement.sql);
+                    if !statement.params.is_empty() {
+                        let params: Vec<String> = statement.params.iter().map(json_param).collect();
+                        println!("-- parameters: [{}]", params.join(", "));
+                    }
                 }
             }
             Ok(SUCCESS)
@@ -400,7 +426,7 @@ fn problems(text: &str, options: &Options<'_>) -> Vec<Diagnostic> {
         return parsed.diagnostics;
     }
     let mut queries: Vec<Option<&str>> = Vec::new();
-    if parsed.file.query.is_some() {
+    if !parsed.file.statements.is_empty() {
         queries.push(None);
     }
     for item in &parsed.file.items {
@@ -468,6 +494,17 @@ fn count(n: usize, word: &str) -> String {
         format!("1 {word}")
     } else {
         format!("{n} {word}s")
+    }
+}
+
+/// What a statement does, as JSON names it.
+pub(crate) fn kind_name(kind: StatementKind) -> &'static str {
+    match kind {
+        StatementKind::Query => "query",
+        StatementKind::Change => "change",
+        StatementKind::Definition => "definition",
+        StatementKind::Begin => "begin",
+        StatementKind::Commit => "commit",
     }
 }
 

@@ -168,7 +168,7 @@ LIMIT 20
     );
     assert_eq!(
         text(&json.stdout),
-        "{\"sql\": \"SELECT *\\nFROM t\\nWHERE a = %s\", \"params\": [\"x\\\"y\"], \"args\": []}\n"
+        "{\"sql\": \"SELECT *\\nFROM t\\nWHERE a = %s\", \"params\": [\"x\\\"y\"], \"args\": [], \"statements\": [{\"sql\": \"SELECT *\\nFROM t\\nWHERE a = %s\", \"params\": [\"x\\\"y\"], \"kind\": \"query\"}]}\n"
     );
 }
 
@@ -294,6 +294,19 @@ fn messages(output: &[u8]) -> Vec<String> {
         "the output ends inside a message: {rest:?}"
     );
     found
+}
+
+#[test]
+fn a_script_is_written_statement_by_statement() {
+    let out = bcql(
+        &["compile", "--dialect", "sqlite", "-"],
+        "create table t:\n    id: int = field(primary_key=True)\n    name: str\n\nfrom [{\"id\": 1, \"name\": \"a\"}]\ninsert into t\n\nfrom t\nwhere name == \"a\"\n",
+    );
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(
+        text(&out.stdout),
+        "CREATE TABLE t (\n  id INTEGER NOT NULL,\n  name TEXT NOT NULL,\n  PRIMARY KEY (id)\n);\n\nINSERT INTO t (id, name)\nVALUES (1, ?);\n-- parameters: [\"a\"]\n\nSELECT *\nFROM t\nWHERE name = ?;\n-- parameters: [\"a\"]\n"
+    );
 }
 
 #[test]

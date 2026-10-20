@@ -18,9 +18,29 @@ Everything ButtercupQL has built in. An editor shows these descriptions as you t
 | `summarize:` | One row of totals for all the rows, from the indented block below. |
 | `join accounts on account_id == accounts.id` | Add another table's columns to the rows that match. |
 | `left join accounts on account_id == accounts.id` | Add another table's columns, keeping the rows that have no match. |
+| `update status = "closed", risk += 1` | Change the rows the steps before chose: give columns new values. A `select` after it gives the rows changed. |
+| `delete` | Delete the rows the steps before chose. |
+| `insert into archive` | Add the rows of the steps before to a table, its columns matched by name. |
+| `pivot band in ["critical", "high"] by operator:` | One row for each group, with a column of each total of the block below for each value. |
 | `pass` | Do nothing, as in Python: a block with no steps yet. |
 
 A step that adds a column, `name = expression`, has no word of its own.
+
+## Statements
+
+Each of these is a statement of its own, on a line of its own: a change to the database itself. See
+[Changing data](changing-data.md) and [Tables and permissions](tables.md).
+
+| Written | Does |
+|---|---|
+| `create table cases:` | Create a table, its columns written as Python annotations below: `risk: int | None`. `create index on cases(-risk)` creates an index. |
+| `alter table cases:` | Change a table: add a column written as in `create table`, `del` one, or `rename old to new`. |
+| `drop table archive` | Drop a table, or with `drop index`, an index. |
+| `grant read on cases to analyst` | Let users or roles read or write tables: `read`, `write`, `insert`, `update`, `delete` or `all`. |
+| `revoke write on cases from analyst` | Take permissions away again. |
+| `with transaction:` | Run the statements below together: all of them, or none if one fails. |
+
+A `def` written with `@stored` on the line before it is kept in the database: see [Stored defs](tables.md#stored-defs).
 
 ## Totals
 

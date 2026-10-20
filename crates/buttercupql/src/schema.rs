@@ -170,6 +170,8 @@ pub struct Table {
     pub name: String,
     /// Its columns, in order.
     pub columns: Vec<Column>,
+    /// The columns of its primary key, when it has one.
+    pub primary_key: Vec<String>,
 }
 
 impl Table {
@@ -208,6 +210,7 @@ impl Schema {
         self.add_table(Table {
             name: name.into(),
             columns: columns.into_iter().collect(),
+            primary_key: Vec::new(),
         });
         self
     }
@@ -217,6 +220,12 @@ impl Schema {
         self.tables
             .retain(|other| !other.name.eq_ignore_ascii_case(&table.name));
         self.tables.push(table);
+    }
+
+    /// Takes away the table with this name, if there is one.
+    pub fn remove_table(&mut self, name: &str) {
+        self.tables
+            .retain(|table| !table.name.eq_ignore_ascii_case(name));
     }
 
     /// The tables, in the order they were added.
@@ -664,6 +673,7 @@ fn create_table(
         Table {
             name: name.join("."),
             columns,
+            primary_key: primary.clone(),
         },
         primary,
     ))

@@ -556,6 +556,15 @@ fn run_postgres(
 ) -> Result<Vec<Vec<Cell>>, String> {
     // Each row comes back as JSON, so that every kind of value reads the same way.
     let wrapped = format!("SELECT row_to_json(_r)::text FROM (\n{sql}\n) AS _r");
+    run_postgres_json(client, &wrapped, params)
+}
+
+/// Runs SQL that gives each row as one JSON text, and reads the rows.
+fn run_postgres_json(
+    client: &mut postgres::Client,
+    wrapped: &str,
+    params: &[Value],
+) -> Result<Vec<Vec<Cell>>, String> {
     let boxed: Vec<Box<dyn postgres::types::ToSql + Sync>> = params
         .iter()
         .map(|param| -> Box<dyn postgres::types::ToSql + Sync> {
@@ -570,7 +579,7 @@ fn run_postgres(
         .collect();
     let refs: Vec<&(dyn postgres::types::ToSql + Sync)> =
         boxed.iter().map(|param| param.as_ref()).collect();
-    let rows = client.query(&wrapped, &refs).map_err(|error| {
+    let rows = client.query(wrapped, &refs).map_err(|error| {
         let detail = error
             .as_db_error()
             .map_or(String::new(), |db| format!(": {}", db.message()));
@@ -1029,5 +1038,723 @@ fn every_example_runs() {
             .into_iter()
             .filter(|failure| !failure.contains(": wrong rows")),
     );
+    report(failures);
+}
+
+// ---- Scripts: statements that change the database, run in order
+
+/// A script: statements that make tables, add and change rows, then a last statement whose rows are checked.
+struct Script {
+    name: &'static str,
+    text: String,
+    /// The rows the last statement gives, if it gives any.
+    rows: Vec<Vec<Cell>>,
+    /// The databases that can't do what the script does, and what their error says.
+    not_on: Vec<(Dialect, &'static str)>,
+    /// SQL run after the script, on one database, and the rows it must give: for what a script keeps in the
+    /// database, such as a stored `def`.
+    checks: Vec<(Dialect, &'static str, Vec<Vec<Cell>>)>,
+    /// SQL run before the script, on one database: the roles a `grant` needs.
+    setup: Vec<(Dialect, &'static str)>,
+}
+
+/// The accounts most scripts start with.
+const ACCOUNTS: &str = "\
+create table accounts:
+    id: str = field(primary_key=True)
+    operator: str
+    balance: int = 0
+
+from [
+    {\"id\": \"A1\", \"operator\": \"Acme\", \"balance\": 100},
+    {\"id\": \"A2\", \"operator\": \"Beta\", \"balance\": 50},
+    {\"id\": \"A3\", \"operator\": \"Gamma\", \"balance\": -7},
+]
+insert into accounts
+";
+
+fn script(name: &'static str, text: &str, rows: Vec<Vec<Cell>>) -> Script {
+    Script {
+        name,
+        text: text.to_string(),
+        rows,
+        not_on: Vec::new(),
+        checks: Vec::new(),
+        setup: Vec::new(),
+    }
+}
+
+fn scripts() -> Vec<Script> {
+    let with_accounts = |name, rest: &str, rows| script(name, &format!("{ACCOUNTS}\n{rest}"), rows);
+    let set_tables = "\
+create table a:
+    n: int = field(primary_key=True)
+create table b:
+    n: int = field(primary_key=True)
+from [{\"n\": 1}, {\"n\": 2}, {\"n\": 3}]
+insert into a
+from [{\"n\": 2}, {\"n\": 3}, {\"n\": 4}]
+insert into b
+";
+    let combined = |name, op: &str, rows| {
+        script(
+            name,
+            &format!(
+                "{set_tables}\nboth = (from a; select n) {op} (from b; select n)\n\nfrom both\nsort n\n"
+            ),
+            rows,
+        )
+    };
+    vec![
+        Script {
+            not_on: vec![
+                (Dialect::Sqlite, "SQLite has no users or permissions"),
+                (Dialect::DuckDb, "DuckDB has no users or permissions"),
+            ],
+            setup: vec![
+                (
+                    Dialect::Postgres,
+                    "DO $$ BEGIN CREATE ROLE bcql_reader; EXCEPTION WHEN duplicate_object THEN NULL; END $$",
+                ),
+                (Dialect::ClickHouse, "CREATE ROLE IF NOT EXISTS bcql_reader"),
+            ],
+            checks: vec![
+                (
+                    Dialect::Postgres,
+                    "SELECT has_table_privilege('bcql_reader', 'accounts', 'SELECT')::int AS reads, has_table_privilege('bcql_reader', 'accounts', 'INSERT')::int AS writes",
+                    vec![vec![i(1), i(0)]],
+                ),
+                (
+                    Dialect::ClickHouse,
+                    "SELECT access_type FROM system.grants WHERE role_name = 'bcql_reader' AND database = currentDatabase() AND table = 'accounts' ORDER BY access_type",
+                    column(&[t("SELECT")]),
+                ),
+            ],
+            ..with_accounts(
+                "a grant lets a role read a table, and a revoke takes writing away",
+                "grant read, write on accounts to bcql_reader\nrevoke write on accounts from bcql_reader\n",
+                Vec::new(),
+            )
+        },
+        with_accounts(
+            "rows written in the query go in, with a column's default",
+            "from [{\"id\": \"A4\", \"operator\": \"Delta\"}]\ninsert into accounts\n\nfrom accounts\nsort id\nselect id, operator, balance\n",
+            vec![
+                vec![t("A1"), t("Acme"), i(100)],
+                vec![t("A2"), t("Beta"), i(50)],
+                vec![t("A3"), t("Gamma"), i(-7)],
+                vec![t("A4"), t("Delta"), i(0)],
+            ],
+        ),
+        with_accounts(
+            "an update gives Python's values",
+            "from accounts\nwhere balance > 0\nupdate balance = balance // 3, operator = operator.upper()\n\nfrom accounts\nsort id\nselect id, operator, balance\n",
+            vec![
+                vec![t("A1"), t("ACME"), i(33)],
+                vec![t("A2"), t("BETA"), i(16)],
+                vec![t("A3"), t("Gamma"), i(-7)],
+            ],
+        ),
+        with_accounts(
+            "a delete takes the rows the wheres choose",
+            "from accounts\nwhere balance < 60\ndelete\n\nfrom accounts\nselect id\n",
+            column(&[t("A1")]),
+        ),
+        with_accounts(
+            "an insert from a query matches columns by name",
+            "create table rich:\n    operator: str = field(primary_key=True)\n    id: str\n\nfrom accounts\nwhere balance >= 50\nselect id, operator\ninsert into rich\n\nfrom rich\nsort operator\nselect operator, id\n",
+            vec![vec![t("Acme"), t("A1")], vec![t("Beta"), t("A2")]],
+        ),
+        script(
+            "an update through a link changes the rows it leads to",
+            "\
+create table accounts:
+    id: str = field(primary_key=True)
+    operator: str
+
+create table cases:
+    id: int = field(primary_key=True)
+    account_id: str | None = field(references=accounts.id)
+    status: str = \"open\"
+
+from [{\"id\": \"A1\", \"operator\": \"Acme\"}, {\"id\": \"A2\", \"operator\": \"Beta\"}]
+insert into accounts
+
+from [{\"id\": 1, \"account_id\": \"A1\"}, {\"id\": 2, \"account_id\": \"A2\"}, {\"id\": 3, \"account_id\": \"A1\"}]
+insert into cases
+
+from cases
+where account.operator == \"Acme\"
+update status = \"closed\"
+
+from cases
+sort id
+select id, status
+",
+            vec![
+                vec![i(1), t("closed")],
+                vec![i(2), t("open")],
+                vec![i(3), t("closed")],
+            ],
+        ),
+        Script {
+            not_on: vec![(Dialect::ClickHouse, "ClickHouse can't give the rows a change makes")],
+            ..with_accounts(
+                "a select after a change gives the rows changed",
+                "from accounts\nwhere id == \"A1\"\nupdate balance = balance + 1\nselect id, balance\n",
+                vec![vec![t("A1"), i(101)]],
+            )
+        },
+        Script {
+            not_on: vec![(Dialect::ClickHouse, "ClickHouse runs no transactions")],
+            ..with_accounts(
+                "a transaction moves money between accounts",
+                "with transaction:\n    from accounts; where id == \"A1\"; update balance -= 30\n    from accounts; where id == \"A2\"; update balance += 30\n\nfrom accounts\nsort id\nselect id, balance\n",
+                vec![
+                    vec![t("A1"), i(70)],
+                    vec![t("A2"), i(80)],
+                    vec![t("A3"), i(-7)],
+                ],
+            )
+        },
+        with_accounts(
+            "a table is altered: a column added with its default, one renamed and one dropped",
+            "alter table accounts:\n    region: str = \"east\"\n    note: str | None\n    rename operator to company\n    del note\n\nfrom accounts\nsort id\nselect id, company, region\n",
+            vec![
+                vec![t("A1"), t("Acme"), t("east")],
+                vec![t("A2"), t("Beta"), t("east")],
+                vec![t("A3"), t("Gamma"), t("east")],
+            ],
+        ),
+        script(
+            "a table is dropped and made again",
+            "\
+create table t:
+    id: int = field(primary_key=True)
+drop table t
+drop table t, missing_ok=True
+create table t, exist_ok=True:
+    id: int = field(primary_key=True)
+    name: str
+create table t, exist_ok=True:
+    id: int = field(primary_key=True)
+    name: str
+from [{\"id\": 1, \"name\": \"x\"}]
+insert into t
+
+from t
+select id, name
+",
+            vec![vec![i(1), t("x")]],
+        ),
+        Script {
+            not_on: vec![(Dialect::ClickHouse, "ClickHouse has no indexes like this")],
+            ..with_accounts(
+                "indexes are made, and a unique one keeps its rows apart",
+                "create index on accounts(-balance)\ncreate unique index on accounts(operator)\n\nfrom accounts\nsort -balance\nselect id\n",
+                column(&[t("A1"), t("A2"), t("A3")]),
+            )
+        },
+        Script {
+            not_on: vec![(Dialect::ClickHouse, "ClickHouse's recursive queries keep every row")],
+            ..script(
+            "a recursive query follows transfers round a loop, and ends",
+            "\
+create table transfers:
+    id: int = field(primary_key=True)
+    source: str
+    target: str
+
+from [
+    {\"id\": 1, \"source\": \"A1\", \"target\": \"A2\"},
+    {\"id\": 2, \"source\": \"A2\", \"target\": \"A3\"},
+    {\"id\": 3, \"source\": \"A3\", \"target\": \"A1\"},
+    {\"id\": 4, \"source\": \"B1\", \"target\": \"B2\"},
+]
+insert into transfers
+
+reached = (
+    from [{\"id\": \"A1\"}]
+) | (
+    from transfers
+    join reached on source == reached.id
+    select id = target
+)
+
+from reached
+sort id
+",
+            column(&[t("A1"), t("A2"), t("A3")]),
+            )
+        },
+        script(
+            "a recursive query with `+` follows a chain of transfers",
+            "\
+create table transfers:
+    id: int = field(primary_key=True)
+    source: str
+    target: str
+
+from [
+    {\"id\": 1, \"source\": \"B1\", \"target\": \"B2\"},
+    {\"id\": 2, \"source\": \"B2\", \"target\": \"B3\"},
+    {\"id\": 3, \"source\": \"C1\", \"target\": \"C2\"},
+]
+insert into transfers
+
+chain = (
+    from [{\"id\": \"B1\", \"depth\": 0}]
+) + (
+    from transfers
+    join chain on source == chain.id
+    select id = target, depth = chain.depth + 1
+)
+
+from chain
+sort id
+",
+            vec![vec![t("B1"), i(0)], vec![t("B2"), i(1)], vec![t("B3"), i(2)]],
+        ),
+        combined("`&` keeps the rows in both", "&", column(&[i(2), i(3)])),
+        combined("`|` keeps the rows of both, once", "|", column(&[i(1), i(2), i(3), i(4)])),
+        combined("`-` keeps the rows of the first that are not in the second", "-", column(&[i(1)])),
+        combined(
+            "`+` keeps every row of both",
+            "+",
+            column(&[i(1), i(2), i(2), i(3), i(3), i(4)]),
+        ),
+        script(
+            "a pivot gives a column for each value",
+            "\
+create table cases:
+    id: int = field(primary_key=True)
+    operator: str
+    band: str
+
+from [
+    {\"id\": 1, \"operator\": \"Acme\", \"band\": \"high\"},
+    {\"id\": 2, \"operator\": \"Acme\", \"band\": \"low\"},
+    {\"id\": 3, \"operator\": \"Beta\", \"band\": \"high\"},
+    {\"id\": 4, \"operator\": \"Acme\", \"band\": \"high\"},
+]
+insert into cases
+
+from cases
+pivot band in [\"high\", \"low\"] by operator:
+    n = count()
+sort operator
+",
+            vec![vec![t("Acme"), i(2), i(1)], vec![t("Beta"), i(1), i(0)]],
+        ),
+        script(
+            "rows written in the query are read like a table",
+            "from [{\"name\": \"b\", \"n\": 2}, {\"name\": \"a\", \"n\": 1}, {\"name\": \"c\", \"n\": 0}]\nwhere n > 0\nsort name\n",
+            vec![vec![t("a"), i(1)], vec![t("b"), i(2)]],
+        ),
+        Script {
+            not_on: vec![(Dialect::Sqlite, "SQLite can't keep a query in the database")],
+            checks: vec![
+                (Dialect::Postgres, "SELECT id FROM rich_accounts(60) ORDER BY id", column(&[t("A1")])),
+                (Dialect::DuckDb, "SELECT id FROM rich_accounts(60) ORDER BY id", column(&[t("A1")])),
+                (
+                    Dialect::ClickHouse,
+                    "SELECT id FROM rich_accounts(at_least = 40) ORDER BY id",
+                    column(&[t("A1"), t("A2")]),
+                ),
+            ],
+            ..with_accounts(
+                "a stored def is kept in the database, and called there",
+                "@stored\ndef rich_accounts(at_least: int):\n    from accounts\n    where balance >= at_least\n    select id\n",
+                Vec::new(),
+            )
+        },
+        Script {
+            not_on: vec![
+                (Dialect::Sqlite, "SQLite can't keep a query in the database"),
+                (Dialect::DuckDb, "DuckDB can't keep a query that changes rows"),
+                (Dialect::ClickHouse, "ClickHouse can't keep a query that changes rows"),
+            ],
+            checks: vec![(
+                Dialect::Postgres,
+                "CALL tax(10); SELECT id, balance FROM accounts ORDER BY id",
+                vec![vec![t("A1"), i(90)], vec![t("A2"), i(40)], vec![t("A3"), i(-7)]],
+            )],
+            ..with_accounts(
+                "a stored def that changes rows is a procedure on PostgreSQL",
+                "@stored\ndef tax(amount: int = 5):\n    from accounts\n    where balance > 0\n    update balance -= amount\n",
+                Vec::new(),
+            )
+        },
+    ]
+}
+
+/// What a script gives: the last statement's rows, and each check's.
+type Ran = Result<(Vec<Vec<Cell>>, Vec<Vec<Vec<Cell>>>), String>;
+
+/// Whether a statement gives rows: a query, or a change with a `select` after it.
+fn gives_rows(statement: &buttercupql::Statement) -> bool {
+    statement.kind == buttercupql::StatementKind::Query
+        || (statement.kind == buttercupql::StatementKind::Change
+            && statement.sql.contains("\nRETURNING "))
+}
+
+/// Runs a script on SQLite, in a database of its own: the last statement's rows, and the checks'.
+fn sqlite_script(statements: &[buttercupql::Statement], checks: &[&str]) -> Ran {
+    let connection = rusqlite::Connection::open_in_memory().map_err(|error| error.to_string())?;
+    let mut rows = Vec::new();
+    for (n, statement) in statements.iter().enumerate() {
+        let values = statement.values().map_err(|error| error.to_string())?;
+        if n == statements.len() - 1 && gives_rows(statement) {
+            rows = run_sqlite(&connection, &statement.sql, &values)?;
+        } else {
+            let params = values.iter().map(|value| match value {
+                Value::Null => rusqlite::types::Value::Null,
+                Value::Bool(value) => rusqlite::types::Value::Integer(i64::from(*value)),
+                Value::Int(value) => rusqlite::types::Value::Integer(*value),
+                Value::Float(value) => rusqlite::types::Value::Real(*value),
+                Value::Text(text) => rusqlite::types::Value::Text(text.clone()),
+            });
+            connection
+                .execute(&statement.sql, rusqlite::params_from_iter(params))
+                .map_err(|error| format!("{error}\n{}", statement.sql))?;
+        }
+    }
+    let mut checked = Vec::new();
+    for check in checks {
+        checked.push(run_sqlite(&connection, check, &[])?);
+    }
+    Ok((rows, checked))
+}
+
+/// Runs a script on PostgreSQL, in a schema of its own.
+fn postgres_script(
+    client: &mut postgres::Client,
+    schema: &str,
+    setup: &[&str],
+    statements: &[buttercupql::Statement],
+    checks: &[&str],
+) -> Ran {
+    let refused = |error: postgres::Error| {
+        let detail = error
+            .as_db_error()
+            .map_or(String::new(), |db| format!(": {}", db.message()));
+        format!("{error}{detail}")
+    };
+    client
+        .batch_execute(&format!(
+            "SET search_path TO public; DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema}; SET search_path TO {schema}"
+        ))
+        .map_err(refused)?;
+    for sql in setup {
+        client.batch_execute(sql).map_err(refused)?;
+    }
+    let mut rows = Vec::new();
+    for (n, statement) in statements.iter().enumerate() {
+        let values = statement.values().map_err(|error| error.to_string())?;
+        if n == statements.len() - 1 && gives_rows(statement) {
+            rows = if statement.kind == buttercupql::StatementKind::Change {
+                // A change's rows come back through a query that reads them.
+                let wrapped = format!(
+                    "WITH _changed AS (\n{}\n) SELECT row_to_json(_changed)::text FROM _changed",
+                    statement.sql
+                );
+                run_postgres_json(client, &wrapped, &values)?
+            } else {
+                run_postgres(client, &statement.sql, &values)?
+            };
+            continue;
+        }
+        if values.is_empty() {
+            client
+                .batch_execute(&statement.sql)
+                .map_err(|error| format!("{}\n{}", refused(error), statement.sql))?;
+            continue;
+        }
+        let boxed: Vec<Box<dyn postgres::types::ToSql + Sync>> = values
+            .iter()
+            .map(|value| -> Box<dyn postgres::types::ToSql + Sync> {
+                match value {
+                    Value::Text(text) => Box::new(text.clone()),
+                    Value::Int(value) => Box::new(*value),
+                    Value::Float(value) => Box::new(*value),
+                    Value::Bool(value) => Box::new(*value),
+                    Value::Null => Box::new(Option::<String>::None),
+                }
+            })
+            .collect();
+        let refs: Vec<&(dyn postgres::types::ToSql + Sync)> =
+            boxed.iter().map(|value| value.as_ref()).collect();
+        client
+            .execute(&statement.sql, &refs)
+            .map_err(|error| format!("{}\n{}", refused(error), statement.sql))?;
+    }
+    let mut checked = Vec::new();
+    for check in checks {
+        // A check may be several statements; the last one's rows are compared.
+        let (before, last) = check.rsplit_once("; ").unwrap_or(("", check));
+        if !before.is_empty() {
+            client.batch_execute(before).map_err(refused)?;
+        }
+        checked.push(run_postgres(client, last, &[])?);
+    }
+    Ok((rows, checked))
+}
+
+/// Runs a script on ClickHouse, in a database of its own.
+fn clickhouse_script(
+    clickhouse: &ClickHouse,
+    setup: &[&str],
+    statements: &[buttercupql::Statement],
+    checks: &[&str],
+) -> Ran {
+    clickhouse.send(
+        &format!("DROP DATABASE IF EXISTS {}", clickhouse.database),
+        &[],
+        false,
+    )?;
+    clickhouse.send(
+        &format!("CREATE DATABASE {}", clickhouse.database),
+        &[],
+        false,
+    )?;
+    for sql in setup {
+        clickhouse.send(sql, &[], false)?;
+    }
+    let mut rows = Vec::new();
+    for (n, statement) in statements.iter().enumerate() {
+        let values = statement.values().map_err(|error| error.to_string())?;
+        let named: Vec<(String, Value)> = statement.names.iter().cloned().zip(values).collect();
+        if n == statements.len() - 1 && gives_rows(statement) {
+            rows = clickhouse.run(&statement.sql, &named)?;
+        } else {
+            clickhouse
+                .send(&statement.sql, &named, true)
+                .map_err(|error| format!("{error}\n{}", statement.sql))?;
+        }
+    }
+    let mut checked = Vec::new();
+    for check in checks {
+        checked.push(clickhouse.run(check, &[])?);
+    }
+    Ok((rows, checked))
+}
+
+/// A script kept for DuckDB, with what it must give.
+struct QueuedScript {
+    label: String,
+    statements: Vec<buttercupql::Statement>,
+    rows: Vec<Vec<Cell>>,
+    checks: Vec<(&'static str, Vec<Vec<Cell>>)>,
+}
+
+/// Runs the scripts kept for DuckDB, each in a database of its own, and returns what went wrong.
+fn duckdb_scripts(python: &str, scripts: &[QueuedScript]) -> Vec<String> {
+    let to_json = |value: &Value| match value {
+        Value::Null => serde_json::Value::Null,
+        Value::Bool(value) => serde_json::Value::Bool(*value),
+        Value::Int(value) => serde_json::Value::from(*value),
+        Value::Float(value) => serde_json::Value::from(*value),
+        Value::Text(text) => serde_json::Value::String(text.clone()),
+    };
+    let job = serde_json::json!({
+        "scripts": scripts.iter().map(|script| serde_json::json!({
+            "statements": script.statements.iter().map(|statement| serde_json::json!({
+                "sql": statement.sql,
+                "params": statement.values().unwrap_or_default().iter().map(to_json).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+            "rows": script.statements.last().is_some_and(gives_rows),
+            "checks": script.checks.iter().map(|(sql, _)| *sql).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+    });
+    let runner = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/duckdb_scripts.py");
+    let mut child = Command::new(python)
+        .arg(runner)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the Python for DuckDB starts");
+    child
+        .stdin
+        .take()
+        .expect("its input")
+        .write_all(job.to_string().as_bytes())
+        .expect("the scripts are sent to DuckDB");
+    let out = child.wait_with_output().expect("DuckDB's scripts finish");
+    if !out.status.success() {
+        return vec![format!(
+            "DuckDB's script runner failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        )];
+    }
+    let results: Vec<serde_json::Value> =
+        serde_json::from_slice(&out.stdout).expect("DuckDB's answer is JSON");
+    let rows_of = |value: &serde_json::Value| -> Vec<Vec<Cell>> {
+        value
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|row| {
+                row.as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(json_cell)
+                    .collect()
+            })
+            .collect()
+    };
+    let mut failures = Vec::new();
+    for (script, result) in scripts.iter().zip(results) {
+        if let Some(error) = result.get("error").and_then(serde_json::Value::as_str) {
+            failures.push(format!("{}: the database refused\n{error}", script.label));
+            continue;
+        }
+        let rows = rows_of(&result["rows"]);
+        if rows != script.rows {
+            failures.push(format!(
+                "{}: wrong rows\ngot:\n{}\nwanted:\n{}",
+                script.label,
+                shown(&rows),
+                shown(&script.rows)
+            ));
+        }
+        for ((sql, wanted), got) in script
+            .checks
+            .iter()
+            .zip(result["checks"].as_array().cloned().unwrap_or_default())
+        {
+            let got = rows_of(&got);
+            if got != *wanted {
+                failures.push(format!(
+                    "{}: `{sql}` gave\n{}\nwanted:\n{}",
+                    script.label,
+                    shown(&got),
+                    shown(wanted)
+                ));
+            }
+        }
+    }
+    failures
+}
+
+#[test]
+fn every_script_changes_the_database_as_it_says() {
+    let mut postgres_client = std::env::var("BCQL_POSTGRES_URL").ok().map(|url| {
+        postgres::Client::connect(&url, postgres::NoTls).expect("PostgreSQL can be reached")
+    });
+    let clickhouse = ClickHouse::connect("scripts");
+    let duckdb = std::env::var("BCQL_DUCKDB_PYTHON").ok();
+    let mut queued = Vec::new();
+    let mut failures = Vec::new();
+    for (n, case) in scripts().into_iter().enumerate() {
+        for dialect in Dialect::ALL {
+            let label = format!("{} ({dialect})", case.name);
+            let compiled = buttercupql::compile(&case.text, &Options::new(dialect));
+            if let Some((_, refusal)) = case.not_on.iter().find(|(not, _)| *not == dialect) {
+                match compiled {
+                    Ok(_) => failures.push(format!("{label}: compiles, but {dialect} can't do it")),
+                    Err(problems) => {
+                        if !problems
+                            .iter()
+                            .any(|problem| problem.message.contains(refusal))
+                        {
+                            let messages: Vec<String> =
+                                problems.iter().map(ToString::to_string).collect();
+                            failures.push(format!(
+                                "{label}: refused for another reason: {}",
+                                messages.join("; ")
+                            ));
+                        }
+                    }
+                }
+                continue;
+            }
+            let compiled = match compiled {
+                Ok(compiled) => compiled,
+                Err(problems) => {
+                    let messages: Vec<String> = problems.iter().map(ToString::to_string).collect();
+                    failures.push(format!(
+                        "{label}: does not compile: {}",
+                        messages.join("; ")
+                    ));
+                    continue;
+                }
+            };
+            let checks: Vec<(&'static str, Vec<Vec<Cell>>)> = case
+                .checks
+                .iter()
+                .filter(|(on, _, _)| *on == dialect)
+                .map(|(_, sql, rows)| (*sql, rows.clone()))
+                .collect();
+            let check_sql: Vec<&str> = checks.iter().map(|(sql, _)| *sql).collect();
+            let setup: Vec<&str> = case
+                .setup
+                .iter()
+                .filter(|(on, _)| *on == dialect)
+                .map(|(_, sql)| *sql)
+                .collect();
+            let result = match dialect {
+                Dialect::Sqlite => Some(sqlite_script(&compiled.statements, &check_sql)),
+                Dialect::Postgres => postgres_client.as_mut().map(|client| {
+                    let schema = format!("bcql_script{n}_{}", std::process::id());
+                    let result =
+                        postgres_script(client, &schema, &setup, &compiled.statements, &check_sql);
+                    let _ = client.batch_execute(&format!(
+                        "SET search_path TO public; DROP SCHEMA IF EXISTS {schema} CASCADE"
+                    ));
+                    result
+                }),
+                Dialect::ClickHouse => clickhouse.as_ref().map(|clickhouse| {
+                    clickhouse_script(clickhouse, &setup, &compiled.statements, &check_sql)
+                }),
+                Dialect::DuckDb => {
+                    queued.push(QueuedScript {
+                        label: label.clone(),
+                        statements: compiled.statements.clone(),
+                        rows: case.rows.clone(),
+                        checks: checks.clone(),
+                    });
+                    None
+                }
+            };
+            match result {
+                None => {}
+                Some(Err(error)) => {
+                    failures.push(format!("{label}: the database refused\n{error}"))
+                }
+                Some(Ok((rows, checked))) => {
+                    if rows != case.rows {
+                        failures.push(format!(
+                            "{label}: wrong rows\n{}\ngot:\n{}\nwanted:\n{}",
+                            compiled.sql,
+                            shown(&rows),
+                            shown(&case.rows)
+                        ));
+                    }
+                    for ((sql, wanted), got) in checks.iter().zip(checked) {
+                        if got != *wanted {
+                            failures.push(format!(
+                                "{label}: `{sql}` gave\n{}\nwanted:\n{}",
+                                shown(&got),
+                                shown(wanted)
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some(python) = &duckdb {
+        failures.extend(duckdb_scripts(python, &queued));
+    }
+    if let Some(clickhouse) = &clickhouse {
+        let _ = clickhouse.send(
+            &format!("DROP DATABASE IF EXISTS {}", clickhouse.database),
+            &[],
+            false,
+        );
+    }
     report(failures);
 }

@@ -75,6 +75,13 @@ fn show_expr(expr: &Expr) -> String {
         ExprKind::List(items) => format!("[{}]", show_list(items, " ")),
         ExprKind::Tuple(items) => format!("(tuple {})", show_list(items, " ")),
         ExprKind::Set(items) => format!("{{{}}}", show_list(items, " ")),
+        ExprKind::Dict(pairs) => {
+            let pairs: Vec<String> = pairs
+                .iter()
+                .map(|(key, value)| format!("{}: {}", show_expr(key), show_expr(value)))
+                .collect();
+            format!("{{{}}}", pairs.join(", "))
+        }
         ExprKind::Query(query) => {
             let steps: Vec<String> = query.steps.iter().map(show_step).collect();
             format!("({})", steps.join("; "))
@@ -152,6 +159,147 @@ fn show_step(step: &Step) -> String {
         ),
         StepKind::Call(call) => show_expr(call),
         StepKind::Pass => "pass".to_string(),
+        StepKind::Update(fields) => format!("update {}", show_fields(fields)),
+        StepKind::Delete => "delete".to_string(),
+        StepKind::Insert(table) => format!("insert into {}", show_path(table)),
+        StepKind::Pivot {
+            column,
+            values,
+            by,
+            expanded,
+            ..
+        } => format!(
+            "pivot {} in [{}] by {}: {}",
+            show_expr(column),
+            show_list(values, " "),
+            show_fields(by),
+            show_fields(expanded)
+        ),
+    }
+}
+
+/// A statement, written out with its parts.
+fn show_statement(statement: &Statement) -> String {
+    match &statement.kind {
+        StatementKind::Query(query) => {
+            let steps: Vec<String> = query.steps.iter().map(show_step).collect();
+            steps.join("; ")
+        }
+        StatementKind::Call(call) => format!("call {}", show_expr(call)),
+        StatementKind::Store(name) => format!("store {}", name.text),
+        StatementKind::CreateTable(table) => {
+            let mut parts: Vec<String> = table
+                .columns
+                .iter()
+                .map(|column| {
+                    let mut out = format!(
+                        "{}: {}{}",
+                        column.name.text,
+                        show_path(&column.ty.name),
+                        if column.nullable { " | None" } else { "" }
+                    );
+                    if let Some(default) = &column.default {
+                        out.push_str(&format!(" = {}", show_expr(default)));
+                    }
+                    for arg in &column.field {
+                        out.push_str(&format!(
+                            " {}={}",
+                            arg.name.as_ref().map_or("", |name| name.text.as_str()),
+                            show_expr(&arg.value)
+                        ));
+                    }
+                    out
+                })
+                .collect();
+            for key in &table.keys {
+                let columns: Vec<&str> =
+                    key.columns.iter().map(|name| name.text.as_str()).collect();
+                parts.push(format!(
+                    "{}({})",
+                    if key.primary { "primary_key" } else { "unique" },
+                    columns.join(", ")
+                ));
+            }
+            format!(
+                "create table {}: {}",
+                show_path(&table.name),
+                parts.join("; ")
+            )
+        }
+        StatementKind::CreateIndex(index) => {
+            let keys: Vec<String> = index
+                .keys
+                .iter()
+                .map(|key| {
+                    format!(
+                        "{}{}",
+                        if key.descending { "-" } else { "" },
+                        show_expr(&key.value)
+                    )
+                })
+                .collect();
+            let mut out = format!(
+                "create {}index {}on {}({})",
+                if index.unique { "unique " } else { "" },
+                index
+                    .name
+                    .as_ref()
+                    .map_or(String::new(), |name| format!("{} ", name.text)),
+                show_path(&index.table),
+                keys.join(", ")
+            );
+            for option in &index.options {
+                out.push_str(&format!(
+                    ", {}={}",
+                    option.name.as_ref().map_or("", |name| name.text.as_str()),
+                    show_expr(&option.value)
+                ));
+            }
+            out
+        }
+        StatementKind::AlterTable(alter) => {
+            let changes: Vec<String> = alter
+                .changes
+                .iter()
+                .map(|change| match change {
+                    Change::Add(column) => format!("add {}", column.name.text),
+                    Change::Drop(name) => format!("del {}", name.text),
+                    Change::Rename { from, to } => format!("rename {} to {}", from.text, to.text),
+                })
+                .collect();
+            format!(
+                "alter table {}: {}",
+                show_path(&alter.table),
+                changes.join("; ")
+            )
+        }
+        StatementKind::Drop(drop) => format!(
+            "drop {} {}",
+            if drop.index { "index" } else { "table" },
+            show_path(&drop.name)
+        ),
+        StatementKind::Grant(grant) => {
+            let names = |names: &[Name]| {
+                names
+                    .iter()
+                    .map(|name| name.text.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let tables: Vec<String> = grant.tables.iter().map(show_path).collect();
+            format!(
+                "{} {} on {} {} {}",
+                if grant.revoke { "revoke" } else { "grant" },
+                names(&grant.privileges),
+                tables.join(", "),
+                if grant.revoke { "from" } else { "to" },
+                names(&grant.roles)
+            )
+        }
+        StatementKind::Transaction(body) => {
+            let body: Vec<String> = body.iter().map(show_statement).collect();
+            format!("transaction [{}]", body.join(" | "))
+        }
     }
 }
 
@@ -905,10 +1053,8 @@ fn a_query_starts_with_from_and_has_one() {
         ["a query starts with `from` and a table"]
     );
     assert_eq!(problems("from a\nfrom b\n"), ["a query has one `from`"]);
-    assert_eq!(
-        problems("from a\nwhere x\ndef f():\n    pass\n"),
-        ["a `def` goes before the query"]
-    );
+    // A `def` may follow a query, as a script defines things where it needs them.
+    assert!(problems("from a\nwhere x\ndef f():\n    pass\n").is_empty());
     assert_eq!(
         problems("def f():\n    where a\n    from b\n"),
         ["a `from` starts a query, so it goes on the query's first line"]
@@ -1080,5 +1226,179 @@ fn reading_never_stops_or_breaks_on_broken_text() {
     ];
     for text in broken {
         assert!(!problems(text).is_empty(), "no problem found in {text:?}");
+    }
+}
+
+// ---- Statements
+
+fn statements_of(text: &str) -> Vec<String> {
+    let (file, problems) = parse(text);
+    assert!(problems.is_empty(), "{text}: {problems:#?}");
+    file.statements.iter().map(show_statement).collect()
+}
+
+#[test]
+fn a_script_is_its_statements_in_order() {
+    let text = "\
+create table t, exist_ok=True:
+    id: int = field(primary_key=True)
+    name: str | None
+    n: int = 0
+    tag: Optional[str] = field(default=\"x\", unique=True)
+    unique(name, n)
+create unique index named on t(-n, name), where=n > 0
+alter table t:
+    note: str | None
+    rename name to title
+    del note
+drop table old, missing_ok=True
+drop index named
+grant read, write on t, u to analyst, support
+revoke write on t from support
+
+with transaction:
+    from t; where id == 1; update n -= 1
+    from t; where id == 2; update n += 1
+
+from [{\"id\": 3, \"n\": 1}]
+insert into t
+
+from t
+where n > 0
+delete
+
+from t
+where id == 1
+update n = 5
+select id, n
+";
+    assert_eq!(
+        statements_of(text),
+        [
+            "create table t: id: int primary_key=True; name: str | None; n: int = 0; tag: str | None = \"x\" unique=True; unique(name, n)",
+            "create unique index named on t(-n, name), where=(> n 0)",
+            "alter table t: add note; rename name to title; del note",
+            "drop table old",
+            "drop index named",
+            "grant read, write on t, u to analyst, support",
+            "revoke write on t from support",
+            "transaction [from t; where (== id 1); update n = (- n 1) | from t; where (== id 2); update n = (+ n 1)]",
+            "from [{\"id\": 3, \"n\": 1}]; insert into t",
+            "from t; where (> n 0); delete",
+            "from t; where (== id 1); update n = 5; select id, n",
+        ]
+    );
+}
+
+#[test]
+fn definitions_can_sit_between_statements() {
+    let text = "\
+create table t:
+    id: int
+
+busy = (from t; where id > 1)
+
+@stored
+def by_id(wanted: int):
+    from t
+    where id == wanted
+
+from busy
+";
+    let (file, problems) = parse(text);
+    assert!(problems.is_empty(), "{problems:#?}");
+    let statements: Vec<String> = file.statements.iter().map(show_statement).collect();
+    assert_eq!(
+        statements,
+        ["create table t: id: int", "store by_id", "from busy"]
+    );
+    assert_eq!(file.items.len(), 2);
+    let Item::Def(def) = &file.items[1] else {
+        panic!("the second item is the def");
+    };
+    assert!(def.is_stored());
+    assert_eq!(file.query.as_ref().map(|query| query.steps.len()), Some(1));
+}
+
+#[test]
+fn queries_combine_with_set_operators() {
+    let text = "both = (from a) | (from b) & (from c) + (from d) - (from e)\nfrom both\n";
+    let (file, found) = parse(text);
+    assert!(found.is_empty(), "{found:#?}");
+    let Item::Let(both) = &file.items[0] else {
+        panic!("a named query");
+    };
+    // Python's order: `+` and `-` before `&`, and `&` before `|`.
+    assert_eq!(
+        show_expr(&both.value),
+        "(| (from a) (& (from b) (- (+ (from c) (from d)) (from e))))"
+    );
+    // Between values, `|` and `&` are still mistakes for `or` and `and`.
+    assert_eq!(problems("from t\nwhere a | b\n"), ["use `or`"]);
+}
+
+#[test]
+fn mistakes_in_statements_are_shown_with_the_way_to_write_them() {
+    let cases: [(&str, &str); 14] = [
+        (
+            "from t\nupdate status == \"x\"\n",
+            "use `=` to give the column its new value",
+        ),
+        (
+            "from t\ndelete everything\n",
+            "`delete` takes nothing after it",
+        ),
+        (
+            "from t\ninsert archive\n",
+            "expected `into` after `insert`, found `archive`",
+        ),
+        (
+            "create view v:\n    a: int\n",
+            "expected `table` or `index` after `create`, found `view`",
+        ),
+        (
+            "@cached\ndef f():\n    from t\n",
+            "there is no decorator `@cached`",
+        ),
+        (
+            "@stored def f():\n    from t\n",
+            "a decorator is alone on its line",
+        ),
+        (
+            "from t\npivot band by g:\n    n = count()\n",
+            "`pivot` takes a column and the list of its values that become columns",
+        ),
+        (
+            "from t\npivot band in [x] by g:\n    n = count()\n",
+            "a pivot's values are written in the query",
+        ),
+        (
+            "from t\npivot band in [\"a\"]:\n    n = 1\n",
+            "each total of a pivot is a call",
+        ),
+        (
+            "create table t:\n    a int\n",
+            "expected `:` and the column's type, found `int`",
+        ),
+        (
+            "create table t:\n    a: str | int\n",
+            "after `|`, a column's type takes `None`",
+        ),
+        (
+            "from t\ndelete\nsort key\n",
+            "after a change, only a `select` can follow",
+        ),
+        ("from t\nwhere x in {}\n", "`{}` is an empty dictionary"),
+        (
+            "with transaction:\n    with transaction:\n        from t; delete\n",
+            "a transaction can't hold another",
+        ),
+    ];
+    for (text, wanted) in cases {
+        let found = problems(text);
+        assert!(
+            found.iter().any(|message| message == wanted),
+            "{text:?} gave {found:?}, not {wanted:?}"
+        );
     }
 }

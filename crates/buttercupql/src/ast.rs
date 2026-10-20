@@ -22,15 +22,50 @@ pub struct Path {
     pub span: Span,
 }
 
-/// A ButtercupQL file: definitions first, then the query.
+/// A ButtercupQL file: its imports and definitions, and what it does, in order.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct File {
     /// The string on the file's first line, if there is one.
     pub docstring: Option<Text>,
     /// Imports, `def`s and named values, in order.
     pub items: Vec<Item>,
-    /// The query, when the file has one. A file of definitions alone is a module, for others to import.
+    /// The query that gives the file's rows, when it has one. It is among the statements too. A file of definitions
+    /// alone is a module, for others to import.
     pub query: Option<Query>,
+    /// What the file does, in order: queries, changes to rows, and changes to the database.
+    pub statements: Vec<Statement>,
+}
+
+/// A thing a file does: a query, or a change to the database.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Statement {
+    /// What it does.
+    pub kind: StatementKind,
+    /// Where it is written.
+    pub span: Span,
+}
+
+/// What a statement does.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StatementKind {
+    /// A query: steps that read rows, and may end by changing them with `update`, `delete` or `insert into`.
+    Query(Query),
+    /// A `def` that changes rows, called on a line of its own: `close_stale(90)`.
+    Call(Expr),
+    /// Where a `@stored` def is put in the database. The `def` is among the file's items.
+    Store(Name),
+    /// `create table name:` and its columns.
+    CreateTable(CreateTable),
+    /// `create index on cases(-risk)`.
+    CreateIndex(CreateIndex),
+    /// `alter table name:` and its changes.
+    AlterTable(AlterTable),
+    /// `drop table name`, or `drop index name`.
+    Drop(Drop),
+    /// `grant read on cases to analyst`, or `revoke ...`.
+    Grant(Grant),
+    /// `with transaction:` and the statements that run together, all or none.
+    Transaction(Vec<Statement>),
 }
 
 /// A string written alone on its line, as the first line of a file or a `def`.
@@ -102,6 +137,8 @@ pub struct Def {
     pub params: Vec<Param>,
     /// The type after `->`, if one is written.
     pub returns: Option<Type>,
+    /// The decorators on the lines before it: `@stored`.
+    pub decorators: Vec<Name>,
     /// The string on the body's first line, if there is one.
     pub docstring: Option<Text>,
     /// The steps. A body that starts with `from` makes the `def` a query; otherwise its steps are put in place
@@ -121,6 +158,16 @@ impl Def {
                 ..
             })
         )
+    }
+
+    /// Whether the `def` is a query that changes rows: one that ends with `update`, `delete` or `insert into`.
+    pub fn changes(&self) -> bool {
+        self.is_query() && self.body.iter().any(Step::changes)
+    }
+
+    /// Whether the `def` is to be stored in the database: `@stored`.
+    pub fn is_stored(&self) -> bool {
+        self.decorators.iter().any(|name| name.text == "stored")
     }
 }
 
@@ -166,6 +213,23 @@ pub struct Query {
     pub steps: Vec<Step>,
     /// Where it is written.
     pub span: Span,
+}
+
+impl Query {
+    /// Whether the query changes rows, rather than giving them.
+    pub fn changes(&self) -> bool {
+        self.steps.iter().any(Step::changes)
+    }
+}
+
+impl Step {
+    /// Whether the step changes rows: `update`, `delete` or `insert into`.
+    pub fn changes(&self) -> bool {
+        matches!(
+            self.kind,
+            StepKind::Update(_) | StepKind::Delete | StepKind::Insert(_)
+        )
+    }
 }
 
 /// A step of a query.
@@ -230,6 +294,27 @@ pub enum StepKind {
     Call(Expr),
     /// `pass`: nothing.
     Pass,
+    /// `update status = "closed", risk += 1`: change the rows the steps before chose.
+    Update(Vec<Field>),
+    /// `delete`: delete the rows the steps before chose.
+    Delete,
+    /// `insert into archive`: add the rows to a table.
+    Insert(Path),
+    /// `pivot band in ["critical", "high"] by operator:` and its block: one row per group, with a column of each
+    /// total for each value.
+    Pivot {
+        /// The column whose values become columns.
+        column: Expr,
+        /// Its values, each a column.
+        values: Vec<Expr>,
+        /// The columns that make the groups.
+        by: Vec<Field>,
+        /// The totals worked out for each value.
+        totals: Vec<Field>,
+        /// The totals as `group by` works them out: each total for each value, its condition `column == value`,
+        /// named by the value, or by the value and the total when there are several.
+        expanded: Vec<Field>,
+    },
 }
 
 /// What a `from` or a `join` reads from: a table, a named query, a query `def` called with its arguments, or a
@@ -315,6 +400,8 @@ pub enum ExprKind {
     Tuple(Vec<Expr>),
     /// `{a, b}`.
     Set(Vec<Expr>),
+    /// `{"id": "A1", "operator": "Acme"}`: a row, for `from [...]`.
+    Dict(Vec<(Expr, Expr)>),
     /// A query in brackets, used as a value.
     Query(Box<Query>),
     /// A part that could not be read. Its problem has been reported.
@@ -380,6 +467,10 @@ pub enum BinaryOp {
     Mod,
     /// `**`
     Pow,
+    /// `|`, between queries: their rows, with repeats dropped.
+    BitOr,
+    /// `&`, between queries: the rows in both.
+    BitAnd,
 }
 
 /// A comparison.
@@ -431,6 +522,8 @@ impl BinaryOp {
             BinaryOp::FloorDiv => "//",
             BinaryOp::Mod => "%",
             BinaryOp::Pow => "**",
+            BinaryOp::BitOr => "|",
+            BinaryOp::BitAnd => "&",
         }
     }
 }
@@ -451,4 +544,119 @@ impl CompareOp {
             CompareOp::IsNot => "is not",
         }
     }
+}
+
+/// `create table name:` and its block.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateTable {
+    /// The table.
+    pub name: Path,
+    /// Its columns, in order.
+    pub columns: Vec<ColumnDef>,
+    /// Keys of several columns: `primary_key(a, b)` and `unique(a, b)` lines.
+    pub keys: Vec<TableKey>,
+    /// What is given after a comma: `exist_ok=True`.
+    pub options: Vec<Arg>,
+    /// Where it is written.
+    pub span: Span,
+}
+
+/// A column of a table: `name: type`, `| None` when it can be missing, `= default`, and `field(...)`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColumnDef {
+    /// The column's name.
+    pub name: Name,
+    /// Its type, without `| None`.
+    pub ty: Type,
+    /// Whether it can be missing: `str | None`, or `Optional[str]`.
+    pub nullable: bool,
+    /// Its value when a row leaves it out.
+    pub default: Option<Expr>,
+    /// The arguments of `field(...)`: `primary_key=True`, `unique=True`, `references=accounts.id`.
+    pub field: Vec<Arg>,
+    /// Where it is written.
+    pub span: Span,
+}
+
+/// A key of several columns.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableKey {
+    /// Whether it is the primary key, rather than a unique one.
+    pub primary: bool,
+    /// Its columns.
+    pub columns: Vec<Name>,
+    /// Where it is written.
+    pub span: Span,
+}
+
+/// `create index on cases(-risk, raised)`, or `create unique index name on ...`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateIndex {
+    /// Whether no two rows may have the same values.
+    pub unique: bool,
+    /// The name it is given, if one is written.
+    pub name: Option<Name>,
+    /// The table.
+    pub table: Path,
+    /// The columns, in order; `-` for high to low.
+    pub keys: Vec<SortKey>,
+    /// What is given after a comma: `where=status == "open"`, `exist_ok=True`.
+    pub options: Vec<Arg>,
+    /// Where it is written.
+    pub span: Span,
+}
+
+/// `alter table name:` and its changes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlterTable {
+    /// The table.
+    pub table: Path,
+    /// The changes, in order.
+    pub changes: Vec<Change>,
+    /// Where it is written.
+    pub span: Span,
+}
+
+/// A change to a table.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Change {
+    /// A column to add, written as in `create table`.
+    Add(ColumnDef),
+    /// `del name`: a column to drop.
+    Drop(Name),
+    /// `rename old to new`.
+    Rename {
+        /// The column's name now.
+        from: Name,
+        /// Its new name.
+        to: Name,
+    },
+}
+
+/// `drop table name` or `drop index name`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Drop {
+    /// Whether it is an index, rather than a table.
+    pub index: bool,
+    /// What is dropped.
+    pub name: Path,
+    /// What is given after a comma: `missing_ok=True`.
+    pub options: Vec<Arg>,
+    /// Where it is written.
+    pub span: Span,
+}
+
+/// `grant read, write on cases to analyst`, or `revoke write on cases from analyst`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Grant {
+    /// Whether the permissions are taken away.
+    pub revoke: bool,
+    /// What may be done: `read`, `write`, `insert`, `update`, `delete` or `all`.
+    pub privileges: Vec<Name>,
+    /// The tables.
+    pub tables: Vec<Path>,
+    /// The users or roles.
+    pub roles: Vec<Name>,
+    /// Where it is written.
+    pub span: Span,
 }

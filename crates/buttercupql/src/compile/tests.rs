@@ -1217,3 +1217,430 @@ fn a_def_reads_its_own_modules_names() {
         "SELECT *\nFROM cases\nWHERE age < 3 AND size < 99"
     );
 }
+
+// ---- Statements: changes to rows, tables, permissions, recursion and pivots
+
+/// The problems' messages for a text that does not compile on a database.
+fn refused(text: &str, dialect: Dialect) -> Vec<String> {
+    match compile(text, &Options::new(dialect)) {
+        Ok(compiled) => panic!("{text:?} compiles for {dialect}:\n{}", compiled.sql),
+        Err(problems) => problems
+            .into_iter()
+            .filter(|problem| problem.severity == crate::Severity::Error)
+            .map(|problem| problem.message)
+            .collect(),
+    }
+}
+
+#[test]
+fn a_change_is_a_step_at_the_end_of_a_query() {
+    let update = "from cases\nwhere status == \"open\"\nupdate status = \"closed\", risk += 1\n";
+    assert_eq!(
+        pg(update),
+        "UPDATE cases SET status = $1, risk = risk + 1\nWHERE status = $2"
+    );
+    assert_eq!(
+        sql_for(update, Dialect::ClickHouse),
+        "ALTER TABLE cases UPDATE status = {p1:String}, risk = risk + 1\nWHERE status = {p2:String}\nSETTINGS mutations_sync = 1"
+    );
+    assert_eq!(
+        pg("from cases\nwhere key.startswith(\"T\")\ndelete\n"),
+        "DELETE FROM cases\nWHERE key LIKE $1 ESCAPE '\\'"
+    );
+    assert_eq!(
+        sql_for("from cases\ndelete\n", Dialect::ClickHouse),
+        "DELETE FROM cases\nWHERE true"
+    );
+    assert_eq!(
+        pg("from cases\nwhere status == \"closed\"\nselect key, status\ninsert into archive\n"),
+        "INSERT INTO archive (key, status)\nSELECT key, status\nFROM cases\nWHERE status = $1"
+    );
+    assert_eq!(
+        lite(
+            "from [{\"id\": \"A1\", \"n\": 1}, {\"n\": 2, \"id\": \"A2\"}]\ninsert into accounts\n"
+        ),
+        "INSERT INTO accounts (id, n)\nVALUES (?, 1), (?, 2)"
+    );
+    // The values of an update keep Python's meaning.
+    assert_eq!(
+        lite("from t\nupdate half = n / 2, low = n // 2\n"),
+        "UPDATE t SET half = n * 1.0 / 2, low = CAST(n * 1.0 / 2 AS INTEGER) - (n * 1.0 / 2 < CAST(n * 1.0 / 2 AS INTEGER))"
+    );
+}
+
+#[test]
+fn a_select_after_a_change_gives_the_rows_changed() {
+    assert_eq!(
+        pg("from cases\nwhere key == \"C1\"\nupdate status = \"closed\"\nselect key, status\n"),
+        "UPDATE cases SET status = $1\nWHERE key = $2\nRETURNING key, status"
+    );
+    assert_eq!(
+        refused(
+            "from cases\nwhere key == \"C1\"\ndelete\nselect key\n",
+            Dialect::ClickHouse
+        ),
+        ["ClickHouse can't give the rows a change makes"]
+    );
+    assert_eq!(
+        refused("from cases\ndelete\nsort key\n", Dialect::Postgres),
+        ["after a change, only a `select` can follow"]
+    );
+}
+
+#[test]
+fn only_wheres_choose_the_rows_to_change() {
+    assert_eq!(
+        refused(
+            "from cases\nsort -risk\nupdate status = \"x\"\n",
+            Dialect::Postgres
+        ),
+        ["only `where` can choose the rows to update"]
+    );
+    assert_eq!(
+        refused("from (from cases)\ndelete\n", Dialect::Postgres),
+        ["`delete` changes the rows of a table"]
+    );
+    let warned = compile("from cases\ndelete\n", &Options::new(Dialect::Sqlite)).unwrap();
+    assert_eq!(warned.warnings[0].message, "this deletes every row");
+    let schema = schema();
+    let typo = compile(
+        "from cases\nupdate stauts = \"x\"\n",
+        &Options::new(Dialect::Postgres).with_schema(&schema),
+    )
+    .unwrap_err();
+    assert_eq!(typo[0].label, "did you mean `status`?");
+}
+
+#[test]
+fn a_change_through_a_link_chooses_rows_by_their_key() {
+    assert_eq!(
+        with_links("from cases\nwhere account.operator == \"Acme\"\nupdate risk = 0\n").unwrap(),
+        "UPDATE cases SET risk = 0\nWHERE id IN (\n  SELECT cases.id\n  FROM cases\n  LEFT JOIN accounts AS account ON cases.account_id = account.id\n  WHERE account.operator = $1\n)"
+    );
+}
+
+#[test]
+fn tables_are_created_with_pythons_types() {
+    let text = "\
+create table cases, exist_ok=True:
+    id: int = field(primary_key=True)
+    key: str = field(unique=True)
+    account_id: str | None = field(references=accounts.id)
+    status: str = \"open\"
+    risk: Optional[int]
+    raised: datetime = now()
+";
+    assert_eq!(
+        pg(text),
+        "CREATE TABLE IF NOT EXISTS cases (\n  id BIGINT NOT NULL,\n  key TEXT NOT NULL,\n  account_id TEXT REFERENCES accounts (id),\n  status TEXT NOT NULL DEFAULT 'open',\n  risk BIGINT,\n  raised TIMESTAMP NOT NULL DEFAULT (now()),\n  PRIMARY KEY (id),\n  UNIQUE (key)\n)"
+    );
+    assert_eq!(
+        lite(text),
+        "CREATE TABLE IF NOT EXISTS cases (\n  id INTEGER NOT NULL,\n  key TEXT NOT NULL,\n  account_id TEXT REFERENCES accounts (id),\n  status TEXT NOT NULL DEFAULT 'open',\n  risk INTEGER,\n  raised TEXT NOT NULL DEFAULT (datetime('now')),\n  PRIMARY KEY (id),\n  UNIQUE (key)\n)"
+    );
+    let clickhouse = compile(text, &Options::new(Dialect::ClickHouse)).unwrap();
+    assert_eq!(
+        clickhouse.sql,
+        "CREATE TABLE IF NOT EXISTS cases (\n  id Int64,\n  key String,\n  account_id Nullable(String),\n  status String DEFAULT 'open',\n  risk Nullable(Int64),\n  raised DateTime DEFAULT (now())\n)\nENGINE = MergeTree\nORDER BY (id)"
+    );
+    assert_eq!(
+        clickhouse.warnings[0].message,
+        "ClickHouse keeps neither unique keys nor references, so they are left out"
+    );
+    assert_eq!(
+        refused("create table t:\n    a: string\n", Dialect::Postgres),
+        ["there is no column type `string`"]
+    );
+    assert_eq!(
+        refused("create table t:\n    a: int = \"x\"\n", Dialect::Postgres),
+        ["`a` is a whole number, and this default is text"]
+    );
+    assert_eq!(
+        refused(
+            "create table t, exists_ok=True:\n    a: int\n",
+            Dialect::Postgres
+        ),
+        ["`create table` has no option `exists_ok`"]
+    );
+}
+
+#[test]
+fn indexes_keep_the_order_sort_uses() {
+    let text = "create index on cases(-risk, raised)\n";
+    assert_eq!(
+        pg(text),
+        "CREATE INDEX cases_risk_raised_idx ON cases (risk DESC NULLS LAST, raised)"
+    );
+    assert_eq!(
+        lite(text),
+        "CREATE INDEX cases_risk_raised_idx ON cases (risk DESC, raised)"
+    );
+    assert_eq!(
+        sql_for(text, Dialect::DuckDb),
+        "CREATE INDEX cases_risk_raised_idx ON cases (risk, raised)"
+    );
+    assert_eq!(
+        pg("create unique index risky on cases(key), where=status == \"open\", exist_ok=True\n"),
+        "CREATE UNIQUE INDEX IF NOT EXISTS risky ON cases (key) WHERE status = 'open'"
+    );
+    assert_eq!(
+        refused(text, Dialect::ClickHouse),
+        ["ClickHouse has no indexes like this"]
+    );
+}
+
+#[test]
+fn a_table_is_altered_one_change_at_a_time() {
+    let text =
+        "alter table cases:\n    region: str = \"east\"\n    rename risk to score\n    del notes\n";
+    assert_eq!(
+        pg(text),
+        "ALTER TABLE cases ADD COLUMN region TEXT NOT NULL DEFAULT 'east';\n\nALTER TABLE cases RENAME COLUMN risk TO score;\n\nALTER TABLE cases DROP COLUMN notes;"
+    );
+    // DuckDB adds a column with no constraints, then makes it never missing.
+    assert!(
+        sql_for(text, Dialect::DuckDb).starts_with(
+            "ALTER TABLE cases ADD COLUMN region VARCHAR DEFAULT 'east';\n\nALTER TABLE cases ALTER COLUMN region SET NOT NULL;"
+        )
+    );
+    assert_eq!(
+        pg("drop table archive, missing_ok=True\n"),
+        "DROP TABLE IF EXISTS archive"
+    );
+}
+
+#[test]
+fn later_statements_are_checked_against_the_tables_a_script_makes() {
+    let script = "create table t:\n    id: int = field(primary_key=True)\n    name: str\n\nfrom t\nwhere nmae == \"x\"\n";
+    let problems = compile(script, &Options::new(Dialect::Postgres)).unwrap_err();
+    assert_eq!(problems[0].message, "there is no column `nmae` in `t`");
+    assert_eq!(problems[0].label, "did you mean `name`?");
+    let renamed = "create table t:\n    id: int\n    name: str\nalter table t:\n    rename name to title\nfrom t\nwhere title == \"x\"\n";
+    assert!(compile(renamed, &Options::new(Dialect::Postgres)).is_ok());
+    // A table the script drops is gone for the statements after it.
+    let dropped = "create table t:\n    id: int\ndrop table t\nfrom t\n";
+    let problems = compile(dropped, &Options::new(Dialect::Postgres)).unwrap_err();
+    assert_eq!(problems[0].message, "there is no table `t`");
+    // With no schema given, a table the script does not create may still be in the database.
+    let other =
+        "create table archive:\n    key: str\n\nfrom cases\nselect key\ninsert into archive\n";
+    assert!(compile(other, &Options::new(Dialect::Postgres)).is_ok());
+}
+
+#[test]
+fn queries_combine_with_pythons_set_operators() {
+    let text = |op: &str| format!("both = (from a; select n) {op} (from b; select n)\nfrom both\n");
+    assert_eq!(
+        pg(&text("+")),
+        "SELECT *\nFROM (\n  SELECT n\n  FROM a\n  UNION ALL\n  SELECT n\n  FROM b\n) AS _q1"
+    );
+    assert!(pg(&text("|")).contains("\n  UNION\n"));
+    assert!(pg(&text("&")).contains("\n  INTERSECT\n"));
+    assert!(pg(&text("-")).contains("\n  EXCEPT\n"));
+    assert!(sql_for(&text("|"), Dialect::ClickHouse).contains("\n  UNION DISTINCT\n"));
+    assert!(sql_for(&text("&"), Dialect::ClickHouse).contains("\n  INTERSECT DISTINCT\n"));
+    // The second query's columns are matched by name to the first's.
+    assert!(
+        pg("both = (from a; select x, y) + (from b; select y, x)\nfrom both\n")
+            .contains("SELECT y AS y, x AS x\n  FROM b")
+            || pg("both = (from a; select x, y) + (from b; select y, x)\nfrom both\n")
+                .contains("SELECT x, y\n  FROM b")
+    );
+    assert_eq!(
+        refused(
+            "both = (from a; select x) + (from b; select y)\nfrom both\n",
+            Dialect::Postgres
+        ),
+        ["the queries have different columns"]
+    );
+}
+
+#[test]
+fn a_named_query_that_reads_itself_is_recursive() {
+    let text = "\
+reached = (
+    from accounts
+    where id == \"A1\"
+    select id
+) | (
+    from transfers
+    join reached on source == reached.id
+    select id = target
+)
+
+from reached
+";
+    assert_eq!(
+        pg(text),
+        "WITH RECURSIVE reached AS (\n  SELECT id\n  FROM accounts\n  WHERE id = $1\n  UNION\n  SELECT transfers.target AS id\n  FROM transfers\n  JOIN reached ON transfers.source = reached.id\n)\nSELECT *\nFROM reached"
+    );
+    assert_eq!(
+        refused(text, Dialect::ClickHouse),
+        ["ClickHouse's recursive queries keep every row, so they add rows with `+`"]
+    );
+    assert_eq!(
+        refused(
+            "r = (from t) | (from u; join r on a == r.a)\nfrom r\n",
+            Dialect::Postgres
+        ),
+        ["the first part of a recursive query names its columns"]
+    );
+    assert_eq!(
+        refused(
+            "r = (from r) | (from u; select a)\nfrom r\n",
+            Dialect::Postgres
+        ),
+        ["a recursive query reads itself only in its second part"]
+    );
+}
+
+#[test]
+fn a_pivot_is_a_total_for_each_value() {
+    assert_eq!(
+        pg(
+            "from cases\npivot band in [\"high\", \"low\"] by operator:\n    n = count()\n    riskiest = max(risk, where=risk > 0)\n"
+        ),
+        "SELECT operator, count(*) FILTER (WHERE band = $1) AS high_n, max(risk) FILTER (WHERE risk > 0 AND band = $2) AS high_riskiest, count(*) FILTER (WHERE band = $3) AS low_n, max(risk) FILTER (WHERE risk > 0 AND band = $4) AS low_riskiest\nFROM cases\nGROUP BY operator"
+    );
+    assert_eq!(
+        sql_for(
+            "from cases\npivot band in [\"high\"]:\n    n = count()\n",
+            Dialect::ClickHouse
+        ),
+        "SELECT countIf(band = {p1:String}) AS high\nFROM cases"
+    );
+}
+
+#[test]
+fn transactions_and_permissions() {
+    let text = "with transaction:\n    from a; where id == 1; update n -= 1\n    from a; where id == 2; update n += 1\n";
+    assert_eq!(
+        pg(text),
+        "BEGIN;\n\nUPDATE a SET n = n - 1\nWHERE id = 1;\n\nUPDATE a SET n = n + 1\nWHERE id = 2;\n\nCOMMIT;"
+    );
+    assert_eq!(
+        refused(text, Dialect::ClickHouse),
+        ["ClickHouse runs no transactions"]
+    );
+    let grant =
+        "grant read, update on cases, accounts to analyst\nrevoke all on cases from analyst\n";
+    assert_eq!(
+        pg(grant),
+        "GRANT SELECT, UPDATE ON TABLE cases, accounts TO analyst;\n\nREVOKE ALL PRIVILEGES ON TABLE cases FROM analyst;"
+    );
+    assert_eq!(
+        sql_for(grant, Dialect::ClickHouse),
+        "GRANT SELECT, ALTER UPDATE ON cases TO analyst;\n\nGRANT SELECT, ALTER UPDATE ON accounts TO analyst;\n\nREVOKE ALL ON cases FROM analyst;"
+    );
+    assert_eq!(
+        refused(grant, Dialect::Sqlite),
+        [
+            "SQLite has no users or permissions",
+            "SQLite has no users or permissions"
+        ]
+    );
+    assert_eq!(
+        refused("grant reed on cases to analyst\n", Dialect::Postgres),
+        ["there is no permission `reed`"]
+    );
+}
+
+#[test]
+fn a_stored_def_is_kept_in_the_database() {
+    let text = "\
+@stored
+def cases_for(account: str, days_back: int = 30):
+    from cases
+    where account_id == account
+    select key
+";
+    // PostgreSQL needs the types of the columns a function gives, which a schema says.
+    let schema = Schema::from_sql("CREATE TABLE cases (key text NOT NULL, account_id text);")
+        .expect("the schema reads");
+    let compiled = compile(text, &Options::new(Dialect::Postgres).with_schema(&schema)).unwrap();
+    assert_eq!(
+        compiled.sql,
+        "CREATE OR REPLACE FUNCTION cases_for(account TEXT, days_back BIGINT DEFAULT 30)\nRETURNS TABLE (key TEXT)\nLANGUAGE sql STABLE\nAS $bcql$\nSELECT key\nFROM cases\nWHERE account_id = cases_for.account\n$bcql$"
+    );
+    assert_eq!(
+        refused(text, Dialect::Postgres),
+        ["ButtercupQL does not know the type of `key`, which PostgreSQL needs to keep the query"]
+    );
+    // A def that gives a table's whole rows needs no schema.
+    assert!(
+        pg("@stored\ndef open_cases(at_least: int):\n    from cases\n    where risk >= at_least\n")
+            .contains("RETURNS SETOF cases\n")
+    );
+    assert_eq!(
+        sql_for(text, Dialect::DuckDb),
+        "CREATE OR REPLACE MACRO cases_for(account, days_back := 30) AS TABLE\nSELECT key\nFROM cases\nWHERE account_id = account"
+    );
+    let clickhouse = compile(text, &Options::new(Dialect::ClickHouse)).unwrap();
+    assert_eq!(
+        clickhouse.sql,
+        "CREATE OR REPLACE VIEW cases_for AS\nSELECT key\nFROM cases\nWHERE account_id = {account:String}"
+    );
+    assert_eq!(
+        clickhouse.warnings[0].message,
+        "ClickHouse's stored queries take no defaults"
+    );
+    assert_eq!(
+        refused(text, Dialect::Sqlite),
+        ["SQLite can't keep a query in the database"]
+    );
+    assert_eq!(
+        refused(
+            "@stored\ndef f(a):\n    from t\n    where x == a\n",
+            Dialect::Postgres
+        ),
+        ["on PostgreSQL, a stored def's parameters say their types"]
+    );
+    let procedure = "@stored\ndef close(days_old: int = 90):\n    from cases\n    where age > days_old\n    update status = \"closed\"\n";
+    assert_eq!(
+        pg(procedure),
+        "CREATE OR REPLACE PROCEDURE close(days_old BIGINT DEFAULT 90)\nLANGUAGE sql\nBEGIN ATOMIC\nUPDATE cases SET status = 'closed'\nWHERE age > close.days_old;\nEND"
+    );
+    assert_eq!(
+        refused(procedure, Dialect::DuckDb),
+        ["DuckDB can't keep a query that changes rows"]
+    );
+}
+
+#[test]
+fn a_def_that_changes_rows_is_called_on_a_line_of_its_own() {
+    let text = "\
+def close_stale(days_old: int = 90):
+    from cases
+    where status == \"open\" and age > days_old
+    update status = \"closed\"
+
+close_stale(30)
+";
+    assert_eq!(
+        pg(text),
+        "UPDATE cases SET status = $1\nWHERE status = $2 AND age > 30"
+    );
+    let open = compile(
+        text,
+        &Options::new(Dialect::Postgres).with_query("close_stale"),
+    )
+    .unwrap();
+    assert_eq!(
+        open.sql,
+        "UPDATE cases SET status = $1\nWHERE status = $2 AND age > $3"
+    );
+    assert_eq!(
+        refused(
+            "def recent():\n    where x > 1\n\nrecent()\n",
+            Dialect::Postgres
+        ),
+        ["`recent` holds steps, not a query"]
+    );
+    assert_eq!(
+        refused(
+            "from close_stale(1)\n\ndef close_stale(n):\n    from t\n    delete\n",
+            Dialect::Postgres
+        ),
+        ["a query that changes rows can't be read as rows"]
+    );
+}

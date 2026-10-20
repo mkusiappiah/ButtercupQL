@@ -193,10 +193,54 @@ pub struct Arg {
     pub default: Option<Value>,
 }
 
-/// A query compiled to SQL.
+/// A statement of a compiled text, as the database runs it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Statement {
+    /// The SQL.
+    pub sql: String,
+    /// What goes in each placeholder, in order.
+    pub params: Vec<Param>,
+    /// Each placeholder's name, in order.
+    pub names: Vec<String>,
+    /// What the statement does.
+    pub kind: StatementKind,
+}
+
+impl Statement {
+    /// The values for the placeholders, in order: for a statement that takes no arguments.
+    pub fn values(&self) -> Result<Vec<Value>, BindError> {
+        self.params
+            .iter()
+            .map(|param| match param {
+                Param::Value(value) => Ok(value.clone()),
+                Param::Arg(name) => Err(BindError(format!(
+                    "the statement needs a value for `{name}`"
+                ))),
+            })
+            .collect()
+    }
+}
+
+/// What a statement does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StatementKind {
+    /// A query that gives rows.
+    Query,
+    /// A change to rows: `update`, `delete` or `insert into`.
+    Change,
+    /// A change to the database itself: a table, an index, a permission, or a stored `def`.
+    Definition,
+    /// The start of statements that run together, all or none.
+    Begin,
+    /// Their end.
+    Commit,
+}
+
+/// A text compiled to SQL.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Compiled {
-    /// The SQL.
+    /// The SQL. For a text of several statements, all of them, each ended with `;`: run them one by one, from
+    /// [`Compiled::statements`].
     pub sql: String,
     /// What goes in each placeholder, in order: a value written in the query, or an argument given when it runs.
     pub params: Vec<Param>,
@@ -207,6 +251,9 @@ pub struct Compiled {
     pub args: Vec<Arg>,
     /// Problems that do not stop the query compiling, but may mean it does not do what was meant.
     pub warnings: Vec<Diagnostic>,
+    /// The statements, in the order they run: one for a query, and one or more for a text that changes the
+    /// database.
+    pub statements: Vec<Statement>,
 }
 
 /// An argument that was not given, or given but unknown.
@@ -313,12 +360,39 @@ pub fn compile(text: &str, options: &Options<'_>) -> Result<Compiled, Vec<Diagno
         parsed.file,
     );
     let modules = module::load_all(main, options.loader, &mut diagnostics);
-    let mut compiler = compile::Compiler::new(&modules, options.dialect, options.schema);
-    let compiled = match options.query {
-        Some(name) => compiler.named(name),
-        None => compiler.main().map(|select| (select, Vec::new())),
-    };
-    diagnostics.append(&mut compiler.diagnostics);
+    let mut compiled: Vec<sql::Statement> = Vec::new();
+    let mut args = Vec::new();
+    match options.query {
+        Some(name) => {
+            let mut compiler = compile::Compiler::new(&modules, options.dialect, options.schema);
+            if let Some((statement, found)) = compiler.named(name) {
+                compiled.push(statement);
+                args = found;
+            }
+            diagnostics.append(&mut compiler.diagnostics);
+        }
+        None => {
+            let statements = &modules[0].file.statements;
+            if statements.is_empty() {
+                diagnostics.push(
+                    Diagnostic::error(Span::default(), "this file has no query to compile")
+                        .with_help(
+                            "a query starts with `from` and a table, after the file's definitions",
+                        ),
+                );
+            }
+            let mut schema = options.schema.cloned();
+            compile_statements(
+                &modules,
+                statements,
+                options.dialect,
+                &mut schema,
+                options.schema.is_some(),
+                &mut diagnostics,
+                &mut compiled,
+            );
+        }
+    }
     diagnostics.sort_by_key(|diagnostic| {
         (
             diagnostic.file.is_some(),
@@ -329,18 +403,135 @@ pub fn compile(text: &str, options: &Options<'_>) -> Result<Compiled, Vec<Diagno
     let failed = diagnostics
         .iter()
         .any(|diagnostic| diagnostic.severity == Severity::Error);
-    match compiled {
-        Some((select, args)) if !failed => {
-            let style = options.params.unwrap_or(ParamStyle::of(options.dialect));
-            let written = sql::write(&select, options.dialect, style);
-            Ok(Compiled {
+    if failed || compiled.is_empty() {
+        return Err(diagnostics);
+    }
+    let style = options.params.unwrap_or(ParamStyle::of(options.dialect));
+    let statements: Vec<Statement> = compiled
+        .iter()
+        .map(|statement| {
+            let written = sql::write_statement(statement, options.dialect, style);
+            Statement {
                 sql: written.sql,
                 params: written.params,
                 names: written.names,
-                args,
-                warnings: diagnostics,
-            })
+                kind: match statement {
+                    sql::Statement::Select(_) => StatementKind::Query,
+                    sql::Statement::Update { .. }
+                    | sql::Statement::Delete { .. }
+                    | sql::Statement::Insert { .. } => StatementKind::Change,
+                    sql::Statement::Written(_) => StatementKind::Definition,
+                    sql::Statement::Begin => StatementKind::Begin,
+                    sql::Statement::Commit => StatementKind::Commit,
+                },
+            }
+        })
+        .collect();
+    let (sql, params, names) = match statements.as_slice() {
+        [one] => (one.sql.clone(), one.params.clone(), one.names.clone()),
+        several => {
+            let sql: Vec<String> = several
+                .iter()
+                .map(|statement| format!("{};", statement.sql))
+                .collect();
+            (
+                sql.join("\n\n"),
+                several
+                    .iter()
+                    .flat_map(|statement| statement.params.clone())
+                    .collect(),
+                several
+                    .iter()
+                    .flat_map(|statement| statement.names.clone())
+                    .collect(),
+            )
         }
-        _ => Err(diagnostics),
+    };
+    Ok(Compiled {
+        sql,
+        params,
+        names,
+        args,
+        warnings: diagnostics,
+        statements,
+    })
+}
+
+/// Compiles statements in order. Each `create table`, `alter table` and `drop table` changes the schema the
+/// statements after it are checked against.
+fn compile_statements(
+    modules: &[module::Loaded],
+    statements: &[ast::Statement],
+    dialect: Dialect,
+    schema: &mut Option<Schema>,
+    complete: bool,
+    diagnostics: &mut Vec<Diagnostic>,
+    out: &mut Vec<sql::Statement>,
+) {
+    use ast::StatementKind as K;
+    let mut gone: Vec<String> = Vec::new();
+    for statement in statements {
+        if let K::Transaction(body) = &statement.kind {
+            if dialect == Dialect::ClickHouse {
+                diagnostics.push(
+                    Diagnostic::error(statement.span, "ClickHouse runs no transactions")
+                        .with_help("its statements each take effect alone; on ClickHouse, leave out `with transaction:`"),
+                );
+                continue;
+            }
+            out.push(sql::Statement::Begin);
+            compile_statements(modules, body, dialect, schema, complete, diagnostics, out);
+            out.push(sql::Statement::Commit);
+            continue;
+        }
+        // What the statement changes in the schema, for the statements after it.
+        let mut created: Option<Table> = None;
+        let mut dropped: Option<String> = None;
+        {
+            let mut compiler = compile::Compiler::new(modules, dialect, schema.as_ref());
+            if !complete {
+                compiler = compiler.partial().without(&gone);
+            }
+            let written = match &statement.kind {
+                K::Query(query) => compiler.top_statement(&query.steps).map(|one| vec![one]),
+                K::Call(call) => compiler.call_statement(call).map(|one| vec![one]),
+                K::Store(name) => compiler.store(name),
+                K::CreateTable(table) => compiler.create_table(table).map(|(written, table)| {
+                    created = Some(table);
+                    written
+                }),
+                K::CreateIndex(index) => compiler.create_index(index),
+                K::AlterTable(alter) => compiler.alter_table(alter).map(|(written, table)| {
+                    created = table;
+                    written
+                }),
+                K::Drop(drop) => compiler.drop(drop).inspect(|_| {
+                    if !drop.index {
+                        dropped = Some(
+                            drop.name
+                                .parts
+                                .iter()
+                                .map(|part| part.text.as_str())
+                                .collect::<Vec<_>>()
+                                .join("."),
+                        );
+                    }
+                }),
+                K::Grant(grant) => compiler.grant(grant),
+                K::Transaction(_) => None,
+            };
+            out.extend(written.unwrap_or_default());
+            diagnostics.append(&mut compiler.diagnostics);
+        }
+        if let Some(table) = created {
+            gone.retain(|name| !name.eq_ignore_ascii_case(&table.name));
+            schema.get_or_insert_with(Schema::new).add_table(table);
+        }
+        if let Some(name) = dropped {
+            if let Some(schema) = schema {
+                schema.remove_table(&name);
+            }
+            gone.push(name);
+        }
     }
 }
