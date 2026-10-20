@@ -130,3 +130,94 @@ fn a_missing_file_is_reported() {
         "{shown}"
     );
 }
+
+fn example(name: &str) -> String {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples")
+        .join(name)
+        .display()
+        .to_string()
+}
+
+#[test]
+fn compile_writes_the_sql_and_its_parameters() {
+    let out = bcql(&["compile", &example("open_critical.bcql")], "");
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(
+        text(&out.stdout),
+        "\
+SELECT key, account, risk
+FROM cases
+WHERE status = $1 AND band IN ($2, $3) AND raised > now() - INTERVAL '7 days'
+ORDER BY risk DESC NULLS LAST
+LIMIT 20
+-- parameters: [\"open\", \"critical\", \"high\"]
+"
+    );
+    let lite = bcql(
+        &["compile", "--dialect", "sqlite", "-"],
+        "from t\nwhere a == \"x\"\n",
+    );
+    assert_eq!(
+        text(&lite.stdout),
+        "SELECT *\nFROM t\nWHERE a = ?\n-- parameters: [\"x\"]\n"
+    );
+    let json = bcql(
+        &["compile", "--json", "--params=format", "-"],
+        "from t\nwhere a == \"x\\\"y\"\n",
+    );
+    assert_eq!(
+        text(&json.stdout),
+        "{\"sql\": \"SELECT *\\nFROM t\\nWHERE a = %s\", \"params\": [\"x\\\"y\"]}\n"
+    );
+}
+
+#[test]
+fn a_schema_file_lets_names_be_checked() {
+    let schema = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("bcql-schema.sql");
+    std::fs::write(
+        &schema,
+        "CREATE TABLE cases (key text NOT NULL, status text NOT NULL, risk integer);\n",
+    )
+    .expect("the schema is written");
+    let schema = schema.display().to_string();
+    let out = bcql(
+        &["compile", "--schema", &schema, "-"],
+        "from cases\nwhere stauts == \"open\"\n",
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let shown = text(&out.stderr);
+    assert!(
+        shown.contains("error: there is no column `stauts` in `cases`"),
+        "{shown}"
+    );
+    assert!(shown.contains("^^^^^^ did you mean `status`?"), "{shown}");
+    let check = bcql(
+        &["check", "--schema", &schema, "-"],
+        "from cases\nsort -key\n",
+    );
+    assert!(check.status.success(), "{}", text(&check.stderr));
+}
+
+#[test]
+fn compile_shows_every_mistake_at_its_place() {
+    let out = bcql(&["compile", "-"], "from t\nn = count()\n");
+    assert_eq!(out.status.code(), Some(1));
+    let shown = text(&out.stderr);
+    assert!(
+        shown.starts_with("error: `count()` is a total\n"),
+        "{shown}"
+    );
+    assert!(shown.ends_with("bcql: 1 error in <stdin>\n"), "{shown}");
+    assert!(text(&out.stdout).is_empty());
+    assert_eq!(
+        bcql(&["compile", "a.bcql", "b.bcql"], "").status.code(),
+        Some(2)
+    );
+    assert_eq!(
+        bcql(&["compile", "--dialect", "oracle", "-"], "")
+            .status
+            .code(),
+        Some(2)
+    );
+}

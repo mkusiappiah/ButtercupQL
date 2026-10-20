@@ -31,11 +31,12 @@ compiles to (PostgreSQL)
 SELECT key, account, risk
 FROM cases
 WHERE status = $1 AND band IN ($2, $3) AND raised > now() - INTERVAL '7 days'
-ORDER BY risk DESC
+ORDER BY risk DESC NULLS LAST
 LIMIT 20
 ```
 
-with the parameters `["open", "critical", "high"]`.
+with the parameters `["open", "critical", "high"]`. Missing values sort last on every database, so cases with no risk
+come after the others; with a schema that says `risk` is never missing, `NULLS LAST` is left out.
 
 ## Steps
 
@@ -68,7 +69,7 @@ the main one because it sets each column's direction on its own, like Python's `
 | `and`, `or`, `not` | `band == "high" and not closed` | `AND`, `OR`, `NOT` |
 | Membership | `band in ["critical", "high"]`, `operator not in ["X"]` | `IN (...)`, `NOT IN (...)` |
 | Missing values | `assignee is None`, `assignee == None` | `assignee IS NULL` |
-| Arithmetic | `+ - * / // % **` | the database's operators |
+| Arithmetic | `+ - * / // % **`, with Python's meaning: `/` divides exactly, `//` rounds down, `%` takes the divisor's sign | the database's operators, with what makes them mean the same |
 | Conditional | `"urgent" if risk >= 90 else "normal"` | `CASE WHEN ... THEN ... ELSE ... END` |
 | Text | `"Acme" in operator`, `name.lower()`, `name.startswith("A")`, `len(name)` | `LIKE`, `lower()`, `length()` |
 | f-strings | `f"{first} {last}"` | concatenation |
@@ -169,6 +170,13 @@ In SQL, `x = NULL` is never true, a classic and silent bug. In ButtercupQL, `x =
 `x IS NULL`. A list given to `not in` that holds `None` is compiled so that the result still means what it says, where
 SQL would quietly return no rows.
 
+- **Sorting.** Missing values sort last, whichever way the sort goes, on every database.
+- **Comparisons.** A comparison with a missing value is never true, as in SQL: `where risk != 90` leaves out the rows
+  with no risk. To keep them, say so: `where risk != 90 or risk is None`.
+- **Totals of no rows.** `sum()` is `0`, `any()` is `False` and `all()` is `True`, as in Python; `mean()`, `min()` and
+  `max()` of no rows are missing.
+- **Truth.** A `where` takes a value's truth as Python does: `0`, `""` and `None` are false.
+
 ## What the compiler gives back
 
 The SQL text and its parameters, in order. From Python:
@@ -181,7 +189,17 @@ cursor.execute(query.sql, query.params)
 ```
 
 From the command line: `bcql compile query.bcql --dialect sqlite` and `bcql check query.bcql`. ButtercupQL files end in
-`.bcql`.
+`.bcql`. Both take `--schema schema.sql`, the database's own `CREATE TABLE` statements, to check every name against the
+tables.
+
+**Each database.** The same query gives the same rows on SQLite and PostgreSQL:
+
+- **SQLite** keeps dates and times as text. ButtercupQL compares them in the form SQLite's own date functions write,
+  `2026-10-20 14:30:00`, and moves them with those functions: `datetime('now', '-7 days')`.
+- **SQLite** builds often leave out the maths functions, so ButtercupQL does without them: `//` and `%` are worked out
+  from casts, and `x ** 2` to `x ** 4` are multiplications. Other powers need SQLite's `power()`.
+- **PostgreSQL** gets `$1` placeholders and **SQLite** `?`, as their own drivers take them; Python's psycopg takes
+  `%s`, which `--params format` writes.
 
 ## Errors that help
 
@@ -203,6 +221,11 @@ Every error found is reported at once, each pointing at its place, rather than o
 - **Each database's own forms:** `FILTER (WHERE ...)` or `countIf`, and `QUALIFY` where the database has it.
 - **Parameters,** so databases can reuse a query's plan. `literal(x)` writes a value into the SQL instead, for the cases
   where a partial index needs to see it.
+- **Patterns an index can use.** `name.startswith("A")` is `name LIKE 'A%'` on PostgreSQL and `name GLOB 'A*'` on
+  SQLite, with any wildcard in the text made plain.
+- **Sorting with missing values last.** PostgreSQL can serve `ORDER BY risk DESC NULLS LAST` from an index made the same
+  way, `CREATE INDEX ON cases (risk DESC NULLS LAST)`, or from a plain index when the column is `NOT NULL` and the schema
+  says so.
 - **Compiling takes microseconds,** so it can run on every request, and in a browser through WebAssembly.
 
 ## Writing details
