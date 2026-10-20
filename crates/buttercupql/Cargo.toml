@@ -1,0 +1,15 @@
+[package]
+name = "buttercupql"
+description = "ButtercupQL, a Python-like language for SQL: queries in, SQL and its parameters out."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["sql", "query-language", "compiler", "python", "database"]
+categories = ["database", "compilers", "parser-implementations"]
+
+[dependencies]

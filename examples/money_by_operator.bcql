@@ -1,0 +1,9 @@
+# Money moved per operator over 30 days, the busiest first
+from transactions
+where time > now() - days(30)
+group by operator:
+    total = count()
+    money = sum(amount)
+    big = count(where=amount > 1_000_000)
+where money > 1_000_000          # after grouping: the same `where` becomes HAVING
+sort -money

@@ -1,0 +1,7 @@
+# How many operators had more than 100 cases? Grouping twice, with no subquery to write
+from cases
+group by operator:
+    n = count()
+where n > 100
+summarize:
+    operators = count()

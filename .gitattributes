@@ -1,0 +1,2 @@
+# ButtercupQL reads like Python, so GitHub highlights its files as Python.
+*.bcql linguist-language=Python

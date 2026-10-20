@@ -1,0 +1,12 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Michael Kusi-Appiah <appiah.michael@yahoo.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/mkusiappiah/ButtercupQL"
+homepage = "https://github.com/mkusiappiah/ButtercupQL"

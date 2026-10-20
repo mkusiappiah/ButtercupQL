@@ -1,0 +1,88 @@
+# ButtercupQL
+
+[![CI](https://github.com/mkusiappiah/ButtercupQL/actions/workflows/ci.yml/badge.svg)](https://github.com/mkusiappiah/ButtercupQL/actions/workflows/ci.yml)
+
+**A Python-like language for SQL**, named after the buttercup flower.
+
+Write a query the way you would write Python, one step per line in the order the data flows. ButtercupQL compiles it to
+the SQL your database already runs: SQLite and PostgreSQL first, then DuckDB and ClickHouse.
+
+```python
+# Critical cases nobody has taken, riskiest first
+from cases
+where status == "open" and band in ["critical", "high"]
+where raised > now() - days(7)
+sort -risk
+take 20
+select key, account, risk
+```
+
+becomes
+
+```sql
+SELECT key, account, risk
+FROM cases
+WHERE status = $1 AND band IN ($2, $3) AND raised > now() - INTERVAL '7 days'
+ORDER BY risk DESC
+LIMIT 20
+```
+
+with the values `"open"`, `"critical"` and `"high"` passed as parameters, never pasted into the SQL.
+
+## Why
+
+- **Faster to write.** The table comes first, so an editor can complete column names from the first word. Grouping
+  columns are written once, one `where` works before and after grouping, and multi-step logic needs no subqueries.
+- **As fast to run.** The compiler writes one flat `SELECT` where it can, uses each database's own forms, and passes
+  values as parameters so plans can be reused.
+- **Safer and clearer.** `x == None` means `IS NULL`, as it reads. Names are checked against the schema, and every error
+  points at its place with a suggestion.
+- **Reusable.** Named queries, `def` and imports, as in Python.
+
+Grouping, for example, writes each column once and filters the totals with the same `where`:
+
+```python
+from transactions
+where time > now() - days(30)
+group by operator:
+    total = count()
+    money = sum(amount)
+    big = count(where=amount > 1_000_000)
+where money > 1_000_000
+sort -money
+```
+
+## Status
+
+ButtercupQL is being designed. The language is described in [docs/design.md](docs/design.md) (v0.1 draft) and the
+research behind it in [docs/research.md](docs/research.md). The compiler is built next.
+
+## Roadmap
+
+1. **Language design** (v0.1 draft, in review)
+2. **Core:** tokens, the parser, error messages and `bcql check`
+3. **Compiler:** filtering, sorting, selecting, grouping and joins, compiling to SQLite and PostgreSQL, tested against
+   real databases
+4. **More:** `def`, imports, window functions and links; DuckDB and ClickHouse
+5. **Publishing:** the `buttercupql` Python package on PyPI, documentation, editor support and a browser playground
+
+## Building
+
+ButtercupQL is written in Rust (edition 2024).
+
+```sh
+cargo test --workspace
+```
+
+## Licence
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <https://www.apache.org/licenses/LICENSE-2.0>)
+- MIT licence ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
+
+at your option.
+
+## Author
+
+Michael Kusi-Appiah ([@mkusiappiah](https://github.com/mkusiappiah))

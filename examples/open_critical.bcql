@@ -1,0 +1,7 @@
+# Critical cases nobody has taken, riskiest first
+from cases
+where status == "open" and band in ["critical", "high"]
+where raised > now() - days(7)
+sort -risk
+take 20
+select key, account, risk

@@ -1,0 +1,15 @@
+# Steps written once and used anywhere
+
+def recent(days_back=7):
+    """The rows raised in the last `days_back` days."""
+    where raised > now() - days(days_back)
+
+def cases_for(account: str, days_back: int = 30):
+    from cases
+    where account_id == account
+    recent(days_back)
+
+from cases
+recent(30)
+where assignee is None
+take 10
