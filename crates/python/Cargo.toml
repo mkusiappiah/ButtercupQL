@@ -1,0 +1,20 @@
+[package]
+name = "buttercupql-python"
+description = "The Python package of ButtercupQL, a Python-like language for SQL."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[lib]
+name = "_buttercupql"
+crate-type = ["cdylib"]
+
+[dependencies]
+bcql = { path = "../bcql" }
+buttercupql = { path = "../buttercupql" }
+pyo3 = { version = "0.30", features = ["abi3-py39"] }

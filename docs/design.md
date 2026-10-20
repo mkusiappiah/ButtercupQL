@@ -250,6 +250,10 @@ tables.
   empty ones.
 - **PostgreSQL** and **DuckDB** get `$1` placeholders and **SQLite** `?`, as their own drivers take them; Python's
   psycopg takes `%s`, which `--params format` writes.
+- **Text is sorted and compared in the database's own order,** its collation. SQLite, DuckDB and ClickHouse compare
+  character codes, as Python does, so `Acme` comes before `acme`; PostgreSQL follows its database's locale, unless the
+  database or the column uses the `C` collation. ButtercupQL does not write `COLLATE`, which would keep PostgreSQL
+  from using its indexes for the sort.
 
 ## Errors that help
 

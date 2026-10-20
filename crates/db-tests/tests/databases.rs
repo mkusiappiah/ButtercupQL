@@ -424,7 +424,8 @@ fn schema_cases() -> Vec<Case> {
         },
         Case {
             name: "grouping by a link's column",
-            query: "from cases\ngroup by operator = account.operator:\n    n = count()\nsort operator\nselect operator, n",
+            // Sorted by count first: how text with capitals sorts is the database's collation's to say.
+            query: "from cases\ngroup by operator = account.operator:\n    n = count()\nsort -n, operator\nselect operator, n",
             rows: vec![
                 vec![t("Acme"), i(2)],
                 vec![t("Beta"), i(2)],

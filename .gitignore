@@ -3,3 +3,8 @@
 *.swp
 /.venv
 __pycache__/
+/dist
+.pytest_cache/
+# The compiled module that `maturin develop` puts beside the Python source.
+/crates/python/python/buttercupql/*.so
+/crates/python/python/buttercupql/*.pyd

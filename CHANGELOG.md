@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- The Python package, `buttercupql`: `compile()` and `check()`, with every problem found raised as one `CompileError`;
+  schemas as `CREATE TABLE` text, a dict or a `Schema`; a query `def`'s arguments given with `bind()`; modules from
+  files or from texts; and the `bcql` command. One wheel serves every Python from 3.9.
 - DuckDB and ClickHouse, in their own forms: ClickHouse's `{p1:String}` placeholders, `countIf()` and `sumIf()`,
   `maxOrNull()` for the total of no rows, and `join_use_nulls` for left joins; DuckDB's `QUALIFY`.
 - Window functions: totals with `over=`, `sort=` and `rows=` for running and moving totals, and `row_number()`,

@@ -154,6 +154,24 @@ error: there is no step `limit`
 checked 1 file: 2 errors
 ```
 
+## Using it from Python
+
+```sh
+pip install git+https://github.com/mkusiappiah/ButtercupQL   # built with Rust, which must be installed
+```
+
+```python
+import sqlite3
+import buttercupql
+
+query = buttercupql.compile(open("open_critical.bcql").read(), dialect="sqlite")
+rows = sqlite3.connect("cases.db").execute(query.sql, query.params).fetchall()
+```
+
+A mistake raises `buttercupql.CompileError`, which holds every problem found and shows each under its line. A query
+`def` compiled with `query="for_operator"` gives its arguments with `query.bind(operator="Acme")`. The package also
+installs the `bcql` command. [crates/python](crates/python) describes it.
+
 ## Using it from Rust
 
 ```rust
@@ -184,15 +202,24 @@ queries on all four databases.
 ## Building
 
 ButtercupQL is written in Rust (edition 2024). The library and the command have no dependencies. The workspace holds
-three crates: [`buttercupql`](crates/buttercupql), the library; [`bcql`](crates/bcql), the command; and
-[`db-tests`](crates/db-tests), which runs the SQL on real databases: SQLite always, and the others when they are given.
+four crates: [`buttercupql`](crates/buttercupql), the library; [`bcql`](crates/bcql), the command;
+[`buttercupql-python`](crates/python), the Python package; and [`db-tests`](crates/db-tests), which runs the SQL on real
+databases: SQLite always, and the others when they are given.
 
 ```sh
-cargo test --workspace
+cargo test --workspace --exclude buttercupql-python
 BCQL_POSTGRES_URL=postgresql://localhost/test \
 BCQL_DUCKDB_PYTHON=python3 \
 BCQL_CLICKHOUSE_URL=http://localhost:8123 \
 cargo test -p db-tests
+```
+
+The Python package is built with [maturin](https://www.maturin.rs), in a virtual environment:
+
+```sh
+pip install maturin pytest
+maturin develop
+pytest crates/python/tests
 ```
 
 ## Licence

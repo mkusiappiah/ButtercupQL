@@ -1,0 +1,38 @@
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[project]
+name = "buttercupql"
+description = "A Python-like language for SQL: write queries the way you write Python, run them on SQLite, PostgreSQL, DuckDB and ClickHouse."
+readme = "crates/python/README.md"
+requires-python = ">=3.9"
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE-MIT", "LICENSE-APACHE"]
+authors = [{ name = "Michael Kusi-Appiah" }]
+keywords = ["sql", "query-language", "compiler", "sqlite", "postgresql", "duckdb", "clickhouse"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: Database",
+    "Topic :: Software Development :: Compilers",
+]
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/mkusiappiah/ButtercupQL"
+Documentation = "https://mkusiappiah.github.io/ButtercupQL/"
+Repository = "https://github.com/mkusiappiah/ButtercupQL"
+Changelog = "https://github.com/mkusiappiah/ButtercupQL/blob/main/CHANGELOG.md"
+
+[project.scripts]
+bcql = "buttercupql._cli:main"
+
+[tool.maturin]
+# The package is built from the root, so that `pip install` works on the repository itself and the licenses come along.
+manifest-path = "crates/python/Cargo.toml"
+python-source = "crates/python/python"
+module-name = "buttercupql._buttercupql"
+features = ["pyo3/extension-module"]
