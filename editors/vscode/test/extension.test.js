@@ -168,6 +168,9 @@ async function main() {
   await commands["buttercupql.restartServer"]();
   assert.strictEqual(first.stopped, true);
   assert.deepStrictEqual(client.serverOptions.run, { command: bundled, args: ["lsp"] });
+  if (process.platform !== "win32") {
+    assert.strictEqual(fs.statSync(bundled).mode & 0o777, 0o755, "the bundled bcql can run");
+  }
   // And a path in the settings comes first.
   settings["server.path"] = "/opt/bcql/bin/bcql";
   await commands["buttercupql.restartServer"]();

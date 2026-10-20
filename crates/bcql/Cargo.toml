@@ -13,4 +13,4 @@ keywords = ["sql", "query-language", "cli", "compiler", "database"]
 categories = ["command-line-utilities", "database", "compilers"]
 
 [dependencies]
-buttercupql = { path = "../buttercupql", version = "0.0.1" }
+buttercupql = { path = "../buttercupql", version = "0.1.0" }

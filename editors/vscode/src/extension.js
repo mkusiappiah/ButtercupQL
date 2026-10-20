@@ -21,7 +21,18 @@ function serverCommand(context) {
     return configured;
   }
   const bundled = path.join(context.extensionPath, "bin", process.platform === "win32" ? "bcql.exe" : "bcql");
-  return fs.existsSync(bundled) ? bundled : "bcql";
+  if (!fs.existsSync(bundled)) {
+    return "bcql";
+  }
+  if (process.platform !== "win32") {
+    // Unpacking the extension can lose the program's permission to run.
+    try {
+      fs.chmodSync(bundled, 0o755);
+    } catch {
+      // A read-only install: it runs if it already could.
+    }
+  }
+  return bundled;
 }
 
 function settings() {

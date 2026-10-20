@@ -123,7 +123,8 @@ LIMIT $2
 
 ## Try it
 
-With [Rust](https://rustup.rs) installed:
+[Each release](https://github.com/mkusiappiah/ButtercupQL/releases) has `bcql` built for Linux, macOS and Windows.
+Or, with [Rust](https://rustup.rs) installed:
 
 ```sh
 cargo install --git https://github.com/mkusiappiah/ButtercupQL bcql
@@ -166,8 +167,8 @@ typed, completes steps, functions, tables, columns and links, describes each whe
 where a name is defined, in an imported module too.
 
 - **VS Code:** the extension in [editors/vscode](editors/vscode) adds colours and **Show SQL**, the SQL of the query
-  beside the file, kept up to date as you type. Build it with `npm ci && npx vsce package` in that folder and install
-  the `.vsix` with `code --install-extension`.
+  beside the file, kept up to date as you type. Each [release](https://github.com/mkusiappiah/ButtercupQL/releases)
+  has it for each platform, with `bcql` in it: install the `.vsix` with `code --install-extension`.
 - **Other editors:** run `bcql lsp` for `.bcql` files. It takes the settings `{"dialect": "sqlite", "schema":
   "schema.sql"}`, when it starts or when they change.
 
@@ -176,6 +177,8 @@ where a name is defined, in an imported module too.
 ```sh
 pip install git+https://github.com/mkusiappiah/ButtercupQL   # built with Rust, which must be installed
 ```
+
+or install the wheel for your platform from [a release](https://github.com/mkusiappiah/ButtercupQL/releases).
 
 ```py
 import sqlite3
@@ -202,12 +205,12 @@ On failure, `compile` returns every problem found; `render` shows one as `bcql` 
 
 ## Status
 
-The language design is approved: [docs/design.md](docs/design.md) describes it, and
-[docs/research.md](docs/research.md) the research behind it. [The book](https://mkusiappiah.github.io/ButtercupQL/)
-teaches the language and is its reference; its source is in [docs/book](docs/book), and every example in it is
-checked by the tests. The compiler is built for SQLite, PostgreSQL, DuckDB and
-ClickHouse. Each example compiles to the SQL kept beside it in [examples/](examples), and the test suite runs its
-queries on all four databases.
+Version 0.1.0, released on 20 October 2026, is the first. The language design is approved:
+[docs/design.md](docs/design.md) describes it, and [docs/research.md](docs/research.md) the research behind it. [The
+book](https://mkusiappiah.github.io/ButtercupQL/) teaches the language and is its reference; its source is in
+[docs/book](docs/book), and every example in it is checked by the tests. The compiler is built for SQLite, PostgreSQL,
+DuckDB and ClickHouse. Each example compiles to the SQL kept beside it in [examples/](examples), and the test suite runs
+its queries on all four databases.
 
 ## Roadmap
 
@@ -216,14 +219,16 @@ queries on all four databases.
 3. **Compiler:** filtering, sorting, selecting, grouping, joins, named queries and `def`, compiling to SQLite and
    PostgreSQL, tested against both (done)
 4. **More:** imports, window functions, links and queries with arguments; DuckDB and ClickHouse (done)
-5. **Publishing:** the `buttercupql` Python package on PyPI, documentation, editor support and a browser playground
+5. **Publishing:** the `buttercupql` Python package, the book, editor support and the playground (done: version 0.1.0,
+   20 October 2026)
 
 ## Building
 
 ButtercupQL is written in Rust (edition 2024). The library and the command have no dependencies. The workspace holds
-four crates: [`buttercupql`](crates/buttercupql), the library; [`bcql`](crates/bcql), the command;
-[`buttercupql-python`](crates/python), the Python package; and [`db-tests`](crates/db-tests), which runs the SQL on real
-databases: SQLite always, and the others when they are given.
+five crates: [`buttercupql`](crates/buttercupql), the library; [`bcql`](crates/bcql), the command and the language
+server; [`buttercupql-python`](crates/python), the Python package; [`buttercupql-wasm`](crates/wasm), the compiler
+built for WebAssembly, for the playground; and [`db-tests`](crates/db-tests), which runs the SQL on real databases:
+SQLite always, and the others when they are given.
 
 ```sh
 cargo test --workspace --exclude buttercupql-python
@@ -240,6 +245,17 @@ pip install maturin pytest
 maturin develop
 pytest crates/python/tests
 ```
+
+The VS Code extension is in [editors/vscode](editors/vscode) (`npm ci && npm test`), the playground in
+[playground](playground), and the book in [docs/book](docs/book), built with [mdBook](https://rust-lang.github.io/mdBook/):
+
+```sh
+cargo build -p buttercupql-wasm --target wasm32-unknown-unknown --profile wasm
+mdbook build docs/book -d "$PWD/site"
+node playground/build.mjs target/wasm32-unknown-unknown/wasm/buttercupql_wasm.wasm site/playground
+```
+
+A tag `vX.Y.Z` makes a release, with [the release workflow](.github/workflows/release.yml).
 
 ## Licence
 

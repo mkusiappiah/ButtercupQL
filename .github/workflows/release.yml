@@ -1,0 +1,200 @@
+name: Release
+
+# A tag `vX.Y.Z` makes a release: `bcql` for each platform, the Python package's wheels and source, and the VS Code
+# extension, attached to a GitHub release. The Python package goes to PyPI too once the repository's variable
+# PYPI_PUBLISH is `true`, with PyPI's trusted publishing set up for this workflow and its `pypi` environment.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: The tag, the crates and the extension name one version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crates=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          extension=$(node -p "require('./editors/vscode/package.json').version")
+          echo "tag $tag, crates $crates, extension $extension"
+          test "$tag" = "$crates" && test "$tag" = "$extension"
+          grep -q "^## $tag " CHANGELOG.md
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+
+  bcql:
+    name: bcql for ${{ matrix.target }}
+    needs: version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, vscode: linux-x64 }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, vscode: linux-arm64 }
+          - { os: macos-latest, target: x86_64-apple-darwin, vscode: darwin-x64 }
+          - { os: macos-latest, target: aarch64-apple-darwin, vscode: darwin-arm64 }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, vscode: win32-x64 }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: musl
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build
+        run: cargo build -p bcql --release --locked --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          name="bcql-v${{ needs.version.outputs.version }}-${{ matrix.target }}"
+          exe=bcql; [ "${{ runner.os }}" = Windows ] && exe=bcql.exe
+          mkdir -p "dist/$name" vscode
+          cp "target/${{ matrix.target }}/release/$exe" README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
+          cp "target/${{ matrix.target }}/release/$exe" "vscode/$exe"
+          cd dist
+          if [ "${{ runner.os }}" = Windows ]; then 7z a "$name.zip" "$name" > /dev/null; else tar -czf "$name.tar.gz" "$name"; fi
+          rm -r "$name"
+      - name: It runs
+        if: matrix.target != 'x86_64-apple-darwin'
+        shell: bash
+        run: ./vscode/bcql* --version
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bcql-${{ matrix.target }}
+          path: dist/*
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vscode-bcql-${{ matrix.vscode }}
+          path: vscode/*
+
+  wheels:
+    name: Python wheel for ${{ matrix.os }} ${{ matrix.target }}
+    needs: version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64, manylinux: auto }
+          - { os: ubuntu-latest, target: aarch64, manylinux: auto }
+          - { os: ubuntu-latest, target: x86_64, manylinux: musllinux_1_2 }
+          - { os: macos-latest, target: x86_64, manylinux: "" }
+          - { os: macos-latest, target: aarch64, manylinux: "" }
+          - { os: windows-latest, target: x64, manylinux: "" }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release --locked --out dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheel-${{ matrix.os }}-${{ matrix.target }}-${{ matrix.manylinux }}
+          path: dist/*.whl
+
+  sdist:
+    name: Python source
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  vscode:
+    name: VS Code extension
+    needs: [version, bcql]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/vscode
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: vscode-bcql-*
+          path: bins
+      - name: Packages
+        run: npm ci
+      - name: Tests
+        run: npm test
+      - name: One extension for each platform, with its bcql, and one for any platform
+        run: |
+          mkdir -p ../../dist
+          for target in linux-x64 linux-arm64 darwin-x64 darwin-arm64 win32-x64; do
+            rm -rf bin && mkdir bin
+            cp ../../bins/vscode-bcql-$target/* bin/
+            chmod +x bin/*
+            npx vsce package --target "$target" --out ../../dist/
+          done
+          rm -rf bin
+          npx vsce package --out ../../dist/
+          ls -l ../../dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vscode
+          path: dist/*.vsix
+
+  release:
+    name: GitHub release
+    needs: [version, bcql, wheels, sdist, vscode]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          rm -f artifacts/bcql artifacts/bcql.exe
+          cd artifacts && sha256sum * > SHA256SUMS && cd ..
+          awk -v v="$VERSION" '$0 ~ "^## " v " " {on=1; next} /^## / {on=0} on' CHANGELOG.md > notes.md
+          gh release create "$GITHUB_REF_NAME" artifacts/* --title "ButtercupQL $VERSION" --notes-file notes.md --verify-tag
+
+  pypi:
+    name: Publish to PyPI
+    needs: [release]
+    if: vars.PYPI_PUBLISH == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/buttercupql/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: "{wheel-*,sdist}"
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
