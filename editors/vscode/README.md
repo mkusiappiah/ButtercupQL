@@ -30,7 +30,7 @@ This extension gives `.bcql` files:
 The extension runs `bcql lsp`, the ButtercupQL language server. The extension built for your platform brings `bcql`
 with it. Otherwise, install it in one of these ways and the extension finds it on the `PATH`:
 
-- `pip install git+https://github.com/mkusiappiah/ButtercupQL`
+- `pip install buttercupql`
 - `cargo install --git https://github.com/mkusiappiah/ButtercupQL bcql`
 - a build from the [releases](https://github.com/mkusiappiah/ButtercupQL/releases)
 

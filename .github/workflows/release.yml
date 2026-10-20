@@ -1,8 +1,15 @@
 name: Release
 
 # A tag `vX.Y.Z` makes a release: `bcql` for each platform, the Python package's wheels and source, and the VS Code
-# extension, attached to a GitHub release. The Python package goes to PyPI too once the repository's variable
-# PYPI_PUBLISH is `true`, with PyPI's trusted publishing set up for this workflow and its `pypi` environment.
+# extension, attached to a GitHub release. Each of these is turned on by a repository variable:
+#
+# - PYPI_PUBLISH `true`: the Python package goes to PyPI, through PyPI's trusted publishing for this workflow and its
+#   `pypi` environment.
+# - VSCE_PUBLISH `true`: the extension goes to the Visual Studio Marketplace, signed in with Microsoft Entra ID when
+#   AZURE_CLIENT_ID and AZURE_TENANT_ID are set, or with the secret VSCE_PAT.
+# - OVSX_PUBLISH `true`: the extension goes to Open VSX, through its trusted publishing, or with the secret OVSX_PAT.
+#
+# With a personal access token in the secret RELEASE_TOKEN, the GitHub release is made in its owner's name.
 
 on:
   push:
@@ -173,7 +180,7 @@ jobs:
           merge-multiple: true
       - name: Release
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
           VERSION: ${{ needs.version.outputs.version }}
         run: |
           rm -f artifacts/bcql artifacts/bcql.exe
@@ -200,3 +207,59 @@ jobs:
           path: dist
           merge-multiple: true
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  marketplace:
+    name: Publish to the Visual Studio Marketplace
+    needs: [release]
+    if: vars.VSCE_PUBLISH == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: marketplace
+      url: https://marketplace.visualstudio.com/items?itemName=mkusiappiah.buttercupql
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: vscode
+          path: dist
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Sign in with Microsoft Entra ID
+        if: vars.AZURE_CLIENT_ID != ''
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+      - name: Publish
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+          ENTRA: ${{ vars.AZURE_CLIENT_ID != '' }}
+        run: |
+          if [ "$ENTRA" = true ]; then sign_in=--azure-credential; else sign_in=; fi
+          npx --yes @vscode/vsce publish $sign_in --skip-duplicate --packagePath dist/*.vsix
+
+  openvsx:
+    name: Publish to Open VSX
+    needs: [release]
+    if: vars.OVSX_PUBLISH == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: openvsx
+      url: https://open-vsx.org/extension/mkusiappiah/buttercupql
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: vscode
+          path: dist
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Publish
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: npx --yes ovsx publish --skip-duplicate --packagePath dist/*.vsix

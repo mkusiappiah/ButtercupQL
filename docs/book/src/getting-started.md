@@ -7,8 +7,7 @@ these installs it:
 
 - **A release.** Each [release](https://github.com/mkusiappiah/ButtercupQL/releases) has `bcql` built for Linux,
   macOS and Windows: unpack it and put it on your `PATH`.
-- **With Python**, which also gives you the `buttercupql` package:
-  `pip install git+https://github.com/mkusiappiah/ButtercupQL` (Rust must be installed for this).
+- **With Python**, which also gives you the `buttercupql` package: `pip install buttercupql`.
 - **With Rust:** `cargo install --git https://github.com/mkusiappiah/ButtercupQL bcql`.
 
 `bcql --version` says which version you have. You can also try ButtercupQL without installing anything, in

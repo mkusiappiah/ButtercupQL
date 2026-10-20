@@ -4,6 +4,10 @@
 per line in the order the data flows; ButtercupQL compiles it to the SQL your database runs, with every value passed as
 a parameter.
 
+```sh
+pip install buttercupql
+```
+
 ```python
 import sqlite3
 import buttercupql

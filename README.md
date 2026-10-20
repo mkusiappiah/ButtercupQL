@@ -175,10 +175,11 @@ where a name is defined, in an imported module too.
 ## Using it from Python
 
 ```sh
-pip install git+https://github.com/mkusiappiah/ButtercupQL   # built with Rust, which must be installed
+pip install buttercupql
 ```
 
-or install the wheel for your platform from [a release](https://github.com/mkusiappiah/ButtercupQL/releases).
+The package is [on PyPI](https://pypi.org/project/buttercupql/), with one wheel for every Python from 3.9 on Linux,
+macOS and Windows.
 
 ```py
 import sqlite3

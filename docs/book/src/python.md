@@ -4,10 +4,11 @@ The `buttercupql` package compiles ButtercupQL from Python, and brings the `bcql
 compiler itself, built for Python, so it compiles a query in microseconds: fast enough to compile on every request.
 
 ```sh
-pip install git+https://github.com/mkusiappiah/ButtercupQL   # Rust must be installed to build it
+pip install buttercupql
 ```
 
-One package serves every Python from 3.9.
+The package is [on PyPI](https://pypi.org/project/buttercupql/). One wheel serves every Python from 3.9, on Linux,
+macOS and Windows.
 
 ## Compiling and running a query
 
