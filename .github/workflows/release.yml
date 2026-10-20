@@ -178,7 +178,9 @@ jobs:
         run: |
           rm -f artifacts/bcql artifacts/bcql.exe
           cd artifacts && sha256sum * > SHA256SUMS && cd ..
-          awk -v v="$VERSION" '$0 ~ "^## " v " " {on=1; next} /^## / {on=0} on' CHANGELOG.md > notes.md
+          # The changelog's section for this version, its links made to point at the tagged files.
+          awk -v v="$VERSION" '$0 ~ "^## " v " " {on=1; next} /^## / {on=0} on' CHANGELOG.md \
+            | sed "s#](docs/#](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/docs/#g" > notes.md
           gh release create "$GITHUB_REF_NAME" artifacts/* --title "ButtercupQL $VERSION" --notes-file notes.md --verify-tag
 
   pypi:
