@@ -31,7 +31,7 @@ with `bcql` in it, and one for any platform, which uses the `bcql` on your `PATH
 **Extensions: Install from VSIX...**, or:
 
 ```sh
-code --install-extension buttercupql-darwin-arm64-0.1.0.vsix
+code --install-extension buttercupql-darwin-arm64-0.2.0.vsix
 ```
 
 ### Settings

@@ -259,9 +259,9 @@ On failure, `compile` returns every problem found; `render` shows one as `bcql` 
 
 ## Status
 
-Version 0.1.0, released on 20 October 2026, is the first. Changing data and the database, combining queries,
-recursion and pivots are done on `main`, for the next version, with a formal specification of the language and a
-conformance suite. The language design is approved:
+Version 0.2.0, released on 21 October 2026, changes data and the database, combines queries, and has recursion and
+pivots, with a formal specification of the language and a conformance suite; version 0.1.0, the first, came out the
+day before. The language design is approved:
 [docs/design.md](docs/design.md) describes it, and [docs/research.md](docs/research.md) the research behind it. [The
 book](https://mkusiappiah.github.io/ButtercupQL/) teaches the language and is its reference; its source is in
 [docs/book](docs/book), and every example in it is checked by the tests. The compiler is built for SQLite, PostgreSQL,
@@ -279,9 +279,9 @@ its queries on all four databases.
    20 October 2026)
 6. **Changing data and the database:** `update`, `delete` and `insert into`; tables, indexes, transactions,
    permissions and stored `def`s; combining queries, recursion and pivots; `run()` and the notebook magic in Python
-   (done)
+   (done: version 0.2.0, 21 October 2026)
 7. **A formal specification,** [in the book](https://mkusiappiah.github.io/ButtercupQL/spec/index.html), with a
-   [conformance suite](conformance) of cases that run on all four databases (done)
+   [conformance suite](conformance) of cases that run on all four databases (done: version 0.2.0)
 
 ## Building
 

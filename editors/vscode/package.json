@@ -2,7 +2,7 @@
   "name": "buttercupql",
   "displayName": "ButtercupQL",
   "description": "ButtercupQL, a Python-like language for SQL: problems shown as you type, names completed and described, and the SQL each query compiles to.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "mkusiappiah",
   "author": {
     "name": "Michael Kusi-Appiah"

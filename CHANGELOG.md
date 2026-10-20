@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 21 October 2026
+
+ButtercupQL changes data and the database itself, combines queries, and runs from Python and in notebooks. A formal
+specification defines the language, and a conformance suite checks it on all four databases.
 
 ### Added
 
