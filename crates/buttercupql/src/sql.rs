@@ -164,9 +164,46 @@ pub(crate) struct Select {
 }
 
 impl Select {
-    /// Whether the statement reads more than one table, so that its columns are written with their table's name.
-    fn qualified(&self) -> bool {
+    /// Whether the statement's columns are written with their table's name: when it reads more than one table, or,
+    /// on ClickHouse, when it gives a column the name of one it reads. ClickHouse reads such a name as the new
+    /// column wherever it is written alone, in `WHERE` and in the other columns too, where the old one is meant.
+    fn qualified(&self, dialect: Dialect) -> bool {
         !self.joins.is_empty()
+            || (dialect == Dialect::ClickHouse
+                && self.renamed().any(|name| self.reads_column(name)))
+    }
+
+    /// The names of the columns it gives that are not the columns of the same name it reads: `risk` of
+    /// `-risk AS risk`.
+    fn renamed(&self) -> impl Iterator<Item = &str> {
+        self.columns.iter().filter_map(|item| match item {
+            Item::Expr {
+                expr: Expr::Column { name, .. },
+                alias: Some(alias),
+            } if name == alias => None,
+            Item::Expr {
+                alias: Some(alias), ..
+            } => Some(alias.as_str()),
+            _ => None,
+        })
+    }
+
+    /// Whether its own clauses read a column of this name from one of its tables.
+    fn reads_column(&self, name: &str) -> bool {
+        let items = self.columns.iter().any(|item| match item {
+            Item::Expr { expr, .. } => expr.reads_column(name),
+            Item::Star | Item::TableStar(_) => false,
+        });
+        items
+            || self
+                .filter
+                .iter()
+                .chain(&self.group)
+                .chain(&self.having)
+                .chain(&self.qualify)
+                .chain(self.joins.iter().map(|join| &join.on))
+                .any(|expr| expr.reads_column(name))
+            || self.order.iter().any(|order| order.expr.reads_column(name))
     }
 
     /// Whether the statement, or a query inside it, has a `LEFT JOIN`.
@@ -307,6 +344,58 @@ pub(crate) enum Expr {
     Cast(Box<Expr>, &'static str),
     /// `EXTRACT(part FROM x)`.
     Extract(&'static str, Box<Expr>),
+}
+
+impl Expr {
+    /// Whether it reads a column of this name from a table, outside the queries inside it.
+    fn reads_column(&self, wanted: &str) -> bool {
+        let any = |exprs: &[Expr]| exprs.iter().any(|expr| expr.reads_column(wanted));
+        match self {
+            Expr::Column { table, name } => table.is_some() && name == wanted,
+            Expr::Param(..)
+            | Expr::Keyword(_)
+            | Expr::Number(_)
+            | Expr::Text(_)
+            | Expr::Typed(..) => false,
+            Expr::Interval(inner, _)
+            | Expr::Unary(_, inner)
+            | Expr::IsNull(inner, _)
+            | Expr::IsBool(inner, ..)
+            | Expr::InQuery(inner, ..)
+            | Expr::Cast(inner, _)
+            | Expr::Extract(_, inner) => inner.reads_column(wanted),
+            Expr::Binary(_, left, right) => left.reads_column(wanted) || right.reads_column(wanted),
+            Expr::Call(_, args) => any(args),
+            Expr::Aggregate { arg, filter, .. } => [arg, filter]
+                .into_iter()
+                .flatten()
+                .any(|expr| expr.reads_column(wanted)),
+            Expr::Window {
+                function,
+                partition,
+                order,
+                ..
+            } => {
+                function.reads_column(wanted)
+                    || any(partition)
+                    || order.iter().any(|order| order.expr.reads_column(wanted))
+            }
+            Expr::In(value, list, _) => value.reads_column(wanted) || any(list),
+            Expr::Between(value, low, high) => {
+                value.reads_column(wanted) || low.reads_column(wanted) || high.reads_column(wanted)
+            }
+            Expr::Like { expr, pattern, .. } => {
+                expr.reads_column(wanted) || pattern.reads_column(wanted)
+            }
+            Expr::Case(arms, otherwise) => {
+                arms.iter()
+                    .any(|(when, then)| when.reads_column(wanted) || then.reads_column(wanted))
+                    || otherwise
+                        .as_ref()
+                        .is_some_and(|expr| expr.reads_column(wanted))
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -518,6 +607,10 @@ struct Writer {
     numbered: HashMap<String, usize>,
     /// Whether the statement being written reads more than one table.
     qualified: bool,
+    /// While its `ORDER BY` is written, the names of the columns the statement gives in place of columns it reads.
+    /// Alone in `ORDER BY`, such a name means the new column on every database, so the old one is written with its
+    /// table's name.
+    renamed: Vec<String>,
     /// Whether values are written into the SQL, rather than as placeholders.
     inline: bool,
     /// How a `def`'s arguments are written.
@@ -535,6 +628,7 @@ impl Writer {
             values: 0,
             numbered: HashMap::new(),
             qualified: false,
+            renamed: Vec::new(),
             inline: false,
             args: Args::Placeholders,
         }
@@ -711,7 +805,8 @@ impl Writer {
 
     fn select(&mut self, select: &Select, depth: usize) {
         self.with(&select.with, depth);
-        let outer = std::mem::replace(&mut self.qualified, select.qualified());
+        let outer = std::mem::replace(&mut self.qualified, select.qualified(self.dialect));
+        let outer_renamed = std::mem::take(&mut self.renamed);
         self.push(if select.distinct {
             "SELECT DISTINCT "
         } else {
@@ -723,6 +818,7 @@ impl Writer {
         self.items(&select.columns, depth);
         self.clauses(select, depth);
         self.qualified = outer;
+        self.renamed = outer_renamed;
     }
 
     fn items(&mut self, items: &[Item], depth: usize) {
@@ -793,7 +889,9 @@ impl Writer {
         if !select.order.is_empty() {
             self.line(depth);
             self.push("ORDER BY ");
+            self.renamed = select.renamed().map(str::to_string).collect();
             self.order(&select.order, depth);
+            self.renamed.clear();
         }
         match (&select.limit, &select.offset) {
             (Some(limit), None) => {
@@ -1019,7 +1117,8 @@ impl Writer {
     fn bare(&mut self, expr: &Expr, depth: usize) {
         match expr {
             Expr::Column { table, name } => {
-                if let (true, Some(table)) = (self.qualified, table) {
+                let qualified = self.qualified || self.renamed.contains(name);
+                if let (true, Some(table)) = (qualified, table) {
                     self.ident(table);
                     self.push(".");
                 }

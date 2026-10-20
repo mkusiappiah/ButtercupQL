@@ -693,6 +693,43 @@ fn a_schema_lets_columns_be_replaced_and_dropped() {
 }
 
 #[test]
+fn a_column_given_the_name_of_one_it_reads_does_not_take_its_place() {
+    // Alone in `ORDER BY`, `risk` would be the new column on every database: the old one is named with its table.
+    let sorted = "from cases\nsort risk\nselect key, risk = -risk\n";
+    assert_eq!(
+        with_schema(sorted, Dialect::Postgres).unwrap(),
+        "SELECT key, -risk AS risk\nFROM cases\nORDER BY cases.risk"
+    );
+    // A sort by the new column, after the select, keeps the name alone.
+    assert_eq!(
+        with_schema(
+            "from cases\nselect key, risk = -risk\nsort risk\n",
+            Dialect::Postgres
+        )
+        .unwrap(),
+        "SELECT key, -risk AS risk\nFROM cases\nORDER BY risk"
+    );
+    // ClickHouse reads the new column wherever the name is alone, so every column is named with its table.
+    assert_eq!(
+        with_schema(
+            "from cases\nwhere risk > 50\nselect key, risk = risk - 40, before = risk\n",
+            Dialect::ClickHouse
+        )
+        .unwrap(),
+        "SELECT cases.key, cases.risk - 40 AS risk, cases.risk AS before\nFROM cases\nWHERE cases.risk > 50"
+    );
+    // With no column of the same name read, nothing changes.
+    assert_eq!(
+        with_schema(
+            "from cases\nwhere risk > 50\nselect key, doubled = risk * 2\n",
+            Dialect::ClickHouse
+        )
+        .unwrap(),
+        "SELECT key, risk * 2 AS doubled\nFROM cases\nWHERE risk > 50"
+    );
+}
+
+#[test]
 fn a_schema_knows_the_kinds_of_values() {
     assert_eq!(
         with_schema("from accounts\nwhere balance / 2 > 1\n", Dialect::Postgres).unwrap(),

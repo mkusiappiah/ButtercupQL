@@ -178,6 +178,40 @@ select key, risk",
             rows: column(&[t("C5"), t("C3"), t("C6"), t("C2"), t("C1"), t("C4")]),
         },
         Case {
+            name: "a sort before a select that gives a column the name of one it reads",
+            query: "from cases\nwhere risk is not None\nsort risk\nselect key, risk = -risk",
+            rows: vec![
+                vec![t("C5"), i(5)],
+                vec![t("C3"), i(-40)],
+                vec![t("C6"), i(-70)],
+                vec![t("C2"), i(-90)],
+                vec![t("C1"), i(-95)],
+            ],
+        },
+        Case {
+            name: "a where before a select that gives a column the name of one it reads",
+            query: "from cases\nwhere risk > 50\nselect key, risk = risk - 40\nsort key",
+            rows: vec![
+                vec![t("C1"), i(55)],
+                vec![t("C2"), i(50)],
+                vec![t("C6"), i(30)],
+            ],
+        },
+        Case {
+            name: "a select's columns read the columns before it, not each other",
+            query: "from cases\nwhere risk > 50\nselect key, risk = risk * 2, before = risk\nsort key",
+            rows: vec![
+                vec![t("C1"), i(190), i(95)],
+                vec![t("C2"), i(180), i(90)],
+                vec![t("C6"), i(140), i(70)],
+            ],
+        },
+        Case {
+            name: "a total named as the column it totals, and a condition on it",
+            query: "from cases\ngroup by band:\n    risk = max(risk)\nwhere risk > 50\nsort band\nselect band, risk",
+            rows: vec![vec![t("critical"), i(95)], vec![t("high"), i(90)]],
+        },
+        Case {
             name: "not in a list that holds None",
             query: "from cases\nwhere band not in [\"low\", None]\nsort key\nselect key",
             rows: column(&[t("C1"), t("C2"), t("C4"), t("C6")]),

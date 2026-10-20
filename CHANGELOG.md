@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- A sort before a `select` that gives a column the name of one it reads, as in `sort risk` and then
+  `select key, risk = -risk`, sorted the rows by the new column on every database. In `ORDER BY`, the old column is
+  now named with its table: `ORDER BY cases.risk`. ClickHouse reads such a name as the new column wherever it is
+  written alone, so there the query's columns are all named with their tables, and a `where` before the `select`
+  keeps the rows it means.
+
 ## 0.1.0 — 20 October 2026
 
 The first release of ButtercupQL, a Python-like language for SQL.
