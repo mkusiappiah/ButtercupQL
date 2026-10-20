@@ -113,6 +113,14 @@ def test_the_tables_are_read_from_every_database(database):
     assert raised.value.diagnostics[0].label == "did you mean `balance`?"
 
 
+def test_a_percent_sign_in_the_sql_reaches_the_database(database):
+    name, connection = database
+    buttercupql.run(connection, SCRIPT)
+    # `%` is Python's remainder; with psycopg's `%s` placeholders, it is written `%%` in the SQL.
+    rows = buttercupql.run(connection, "from accounts\nwhere balance is not None\nsort id\nselect id, left = balance % 7\n")
+    assert rows == [("A1", 2), ("A2", 0)], name
+
+
 def test_a_script_that_fails_changes_nothing(database):
     name, connection = database
     if name == "clickhouse":

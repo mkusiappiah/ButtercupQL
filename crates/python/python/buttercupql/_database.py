@@ -147,10 +147,9 @@ def _run_dbapi(connection, driver, statements, values):
             if statement.kind in ("begin", "commit"):
                 # A `with transaction:` block runs in the text's own transaction.
                 continue
-            if given:
-                cursor.execute(statement.sql, given)
-            else:
-                cursor.execute(statement.sql)
+            # The values go with every statement, none too: with `%s` placeholders, a `%` in the SQL is written
+            # `%%`, which a driver reads back only when it is given values.
+            cursor.execute(statement.sql, given)
             if cursor.description is not None:
                 rows = Rows(cursor.fetchall(), [column[0] for column in cursor.description])
         if begun:
