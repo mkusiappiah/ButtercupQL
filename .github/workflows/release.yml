@@ -294,3 +294,6 @@ jobs:
             --pattern '*.whl' --pattern 'buttercupql-*.tar.gz'
           ls -l dist
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # A file PyPI has already is left as it is, so the job can run again for a release.
+          skip-existing: true
